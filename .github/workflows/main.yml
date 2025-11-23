@@ -26,6 +26,7 @@ jobs:
           autoconf
           automake
           automake-wrapper
+          autoconf-archive
           libtool
           make
           pkgconf
