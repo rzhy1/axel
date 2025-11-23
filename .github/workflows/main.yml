@@ -34,7 +34,7 @@ jobs:
           curl
           wget
           autoconf-archive
-          gnulib  # For nanosleep compat
+          gnulib
 
     - name: Clone Axel
       shell: msys2 {0}
