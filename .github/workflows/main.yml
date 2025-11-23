@@ -26,6 +26,7 @@ jobs:
           mingw-w64-x86_64-upx
           autoconf
           automake
+          automake-wrapper
           libtool
           make
           pkgconf
@@ -42,7 +43,7 @@ jobs:
         rm -rf po
         echo "Axel source ready"
 
-    - name: Apply Windows Patches (PR #313 Integration)
+    - name: Apply Windows Patches (PR #313 Full Integration + OpenSSL Fix)
       shell: msys2 {0}
       run: |
         cd axel-src
@@ -68,15 +69,29 @@ jobs:
         #undef min
         #undef max
 
-        /* nanosleep stub (simple, for PR #313 compat) */
+        /* nanosleep stub (PR #313 compat) */
         #include <time.h>
         int nanosleep(const struct timespec *req, struct timespec *rem) {
-            Sleep((req->tv_sec * 1000) + (req->tv_nsec / 1000000));
+            (void)rem;
+            DWORD ms = (DWORD)((req->tv_sec * 1000) + (req->tv_nsec / 1000000));
+            Sleep(ms > 0 ? ms : 1);
             return 0;
         }
         #endif  /* _WIN32 */
 
         #endif  /* COMPAT_WIN32_H */
+        EOF
+
+        cat <<'EOF' > src/nanosleep.c
+        #ifdef _WIN32
+        #include <windows.h>
+        int nanosleep(const struct timespec *req, struct timespec *rem) {
+            (void)rem;
+            DWORD ms = (DWORD)((req->tv_sec * 1000) + (req->tv_nsec / 1000000));
+            Sleep(ms > 0 ? ms : 1);
+            return 0;
+        }
+        #endif
         EOF
 
         cat <<'EOF' > patch_axel.py
@@ -132,13 +147,22 @@ jobs:
         main_c = re.sub(r'(return\s+\d+;\s*\})', cleanup + '\\n\\1', main_c)
         write('src/text.c', main_c)
 
-        print("All patches applied (PR #313 style)")
+        print("All source patches applied (PR #313 style)")
         EOF
 
         python3 patch_axel.py
 
-        # configure.ac: PR #313 changes - Skip POSIX checks, add Windows logic
-        sed -i '/AC_CHECK_HEADERS(arpa\/inet.h)/,/}/d' configure.ac  # Remove arpa/inet.h check
+        # PR #313: Fix OpenSSL header conflict (X509_NAME redefinition)
+        if [ -f include/openssl/x509v3.h ]; then
+          sed -i '/#define HEADER_X509V3_H/a\\
+        #ifdef X509_NAME\\
+        #undef X509_NAME\\
+        #endif' include/openssl/x509v3.h
+          echo "Fixed OpenSSL X509_NAME conflict"
+        fi
+
+        # configure.ac: PR #313 changes - Skip POSIX checks, add Windows logic, enable --with-ssl=path support
+        sed -i '/AC_CHECK_HEADERS(arpa\/inet.h)/,/}/d' configure.ac
         sed -i '/AC_CHECK_HEADERS(netinet\/in.h)/,/}/d' configure.ac
         sed -i '/AC_CHECK_HEADERS(sys\/socket.h)/,/}/d' configure.ac
         sed -i '/AC_CHECK_HEADERS(unistd.h)/,/}/d' configure.ac
@@ -155,6 +179,23 @@ jobs:
         )
         EOF
 
+        # PR #313 + issue #325: Enable --with-ssl=PATH (add path parsing to configure.ac)
+        # Find the AC_ARG_WITH(ssl) line and modify it to accept path
+        sed -i 's/AC_ARG_WITH(\[ssl\],.*)/AC_ARG_WITH([ssl], [AS_HELP_STRING([--with-ssl=PATH], [use ssl from given path (default: auto)])], [ssl_path="$withval"], [ssl_path="auto"])/' configure.ac
+        # Add path handling after the arg
+        cat <<'EOF' >> configure.ac
+        if test "x$ssl_path" != "xno" -a "x$ssl_path" != "xauto"; then
+          if test -d "$ssl_path"; then
+            SSL_CFLAGS="-I$ssl_path/include"
+            SSL_LIBS="-L$ssl_path/lib -lssl -lcrypto"
+            PKG_CONFIG_PATH="$ssl_path/lib/pkgconfig:$PKG_CONFIG_PATH"
+            AC_MSG_RESULT([Using SSL from $ssl_path])
+          else
+            AC_MSG_ERROR([Invalid SSL path: $ssl_path])
+          fi
+        fi
+        EOF
+
         sed -i '/AM_GNU_GETTEXT/d' configure.ac
         sed -i 's|po/Makefile.in po||g' configure.ac
         sed -i '/AM_INIT_AUTOMAKE/a LT_INIT' configure.ac
@@ -169,25 +210,29 @@ jobs:
 
         echo "bin_PROGRAMS = axel" > src/Makefile.am
         SOURCES=$(ls src/*.c | tr '\n' ' ')
-        echo "axel_SOURCES = $SOURCES" >> src/Makefile.am
+        echo "axel_SOURCES = $SOURCES nanosleep.c" >> src/Makefile.am
         echo "axel_LDFLAGS = -all-static" >> src/Makefile.am
-        echo "axel_LDADD = -lssl -lcrypto -lws2_32 -lgdi32 -lcrypt32 -lz -lbcrypt -lpthread" >> src/Makefile.am  # PR static deps + pthreads
+        echo "axel_LDADD = -lssl -lcrypto -lws2_32 -lgdi32 -lcrypt32 -lz -lbcrypt" >> src/Makefile.am  # PR static deps
 
         autoreconf -fi
-        echo "Configuration patched (no more arpa/inet.h error)"
+        echo "Configuration patched (PR #313 + OpenSSL path support)"
 
     - name: Configure & Build (Static, PR #313 Style)
       shell: msys2 {0}
       run: |
         cd axel-src
         export PKG_CONFIG="pkgconf --static"
+        export PKG_CONFIG_PATH="/mingw64/lib/pkgconfig:$PKG_CONFIG_PATH"  # PR: Ensure libssl.pc found
         export CFLAGS="-O3 -march=x86-64-v3 -flto=auto -pipe -D_FORTIFY_SOURCE=2 -fstack-protector-strong -I/mingw64/include"
         export LDFLAGS="-static -static-libgcc -static-libstdc++ -L/mingw64/lib"
+        # Fallback env vars (PR recommendation if --with-ssl fails)
+        export SSL_CFLAGS="-I/mingw64/include"
+        export SSL_LIBS="-L/mingw64/lib -lssl -lcrypto -lws2_32"
 
-        # PR #313: Use --with-ssl path for MinGW OpenSSL
+        # Use --with-ssl=yes (now supported via patch) + PR manual flags
         ./configure \
           --host=x86_64-w64-mingw32 \
-          --with-ssl=/mingw64 \
+          --with-ssl=yes \
           --disable-nls \
           --disable-shared \
           --disable-Werror
@@ -215,7 +260,7 @@ jobs:
       with:
         name: axel-windows-x64-static
         path: axel-src/axel.exe
-        retention-days: 7  # Increased for testing
+        retention-days: 7
 
   release:
     needs: build
@@ -236,10 +281,9 @@ jobs:
           tag: ${{ github.ref }}
           name: Axel ${{ env.AXEL_VERSION }} (Windows Static x64)
           body: |
-            Static Windows x64 build (PR #313 fixes applied):
-            - No POSIX header errors (arpa/inet.h skipped)
-            - Full HTTPS/HTTP/FTP support
-            - Zero DLL deps, UPX-compressed (~1.2 MB)
-            - Native Winsock + OpenSSL static
+            Static Windows x64 build (PR #313 + OpenSSL fixes):
+            - No POSIX/arpa/inet.h errors
+            - --with-ssl path support enabled
+            - Full HTTPS/HTTP/FTP, zero DLLs, UPX ~1.2 MB
           artifacts: axel.exe
           token: ${{ secrets.GITHUB_TOKEN }}
