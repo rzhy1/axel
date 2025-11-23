@@ -1,3 +1,4 @@
+
 name: Build Axel (Windows Static)
 
 on:
@@ -26,6 +27,7 @@ jobs:
             autoconf
             automake
             automake-wrapper
+            autoconf-archive
             libtool
             make
             pkgconf
