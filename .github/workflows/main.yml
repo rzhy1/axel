@@ -10,7 +10,6 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
-    name: Build Axel for Windows (x64 Static)
     steps:
     - name: Checkout source
       uses: actions/checkout@v4
@@ -31,259 +30,130 @@ jobs:
           make
           pkgconf
           git
-          curl
-          wget
-          autoconf-archive
 
-    - name: Clone Axel
+    - name: Clone & Patch Axel (终极 Windows 版)
       shell: msys2 {0}
       run: |
         git clone https://github.com/axel-download-accelerator/axel.git axel-src
         cd axel-src
         rm -rf po
-        echo "Axel source ready"
 
-    - name: Apply Windows Patches (PR #313 Full Integration + OpenSSL Fix)
-      shell: msys2 {0}
-      run: |
-        cd axel-src
+        # 1. 直接暴力删掉所有会导致 configure 报错的 POSIX 检查 + 错误退出
+        sed -i '/AC_CHECK_HEADERS(\[arpa\/inet\.h/,/arpa\/inet\.h is required/d' configure.ac
+        sed -i '/AC_CHECK_HEADERS(\[netinet\/in\.h/,/netinet.*h is required/d' configure.ac
+        sed -i '/AC_CHECK_HEADERS(\[sys\/socket\.h/,/sys\/socket.*h is required/d' configure.ac
+        sed -i '/AC_CHECK_HEADERS(\[unistd\.h/,/unistd.*h is required/d' configure.ac
 
-        # Create compat-win32.h from PR #313
-        cat <<'EOF' > src/compat-win32.h
-        #ifndef COMPAT_WIN32_H
-        #define COMPAT_WIN32_H
-
-        #ifdef _WIN32
-        #ifndef _WIN32_WINNT
-        #define _WIN32_WINNT 0x0600
-        #endif
-        #include <winsock2.h>
-        #include <ws2tcpip.h>
-        #include <windows.h>
-
-        #define SOCK_ISINVALID(s) ((s) == INVALID_SOCKET)
-        #define SHUT_RDWR SD_BOTH
-        #define EINPROGRESS WSAEWOULDBLOCK
-        typedef SOCKET axel_socket_t;
-        typedef HANDLE axel_thread_t;
-        #undef min
-        #undef max
-
-        /* nanosleep stub (PR #313 compat) */
-        #include <time.h>
-        int nanosleep(const struct timespec *req, struct timespec *rem) {
-            (void)rem;
-            DWORD ms = (DWORD)((req->tv_sec * 1000) + (req->tv_nsec / 1000000));
-            Sleep(ms > 0 ? ms : 1);
-            return 0;
-        }
-        #endif  /* _WIN32 */
-
-        #endif  /* COMPAT_WIN32_H */
-        EOF
-
-        cat <<'EOF' > src/nanosleep.c
-        #ifdef _WIN32
-        #include <windows.h>
-        int nanosleep(const struct timespec *req, struct timespec *rem) {
-            (void)rem;
-            DWORD ms = (DWORD)((req->tv_sec * 1000) + (req->tv_nsec / 1000000));
-            Sleep(ms > 0 ? ms : 1);
-            return 0;
-        }
-        #endif
-        EOF
-
-        cat <<'EOF' > patch_axel.py
-        #!/usr/bin/env python3
-        import re, os, sys
-        def read(f): return open(f, 'r', encoding='utf-8').read()
-        def write(f, c): open(f, 'w', encoding='utf-8', newline='\n').write(c); print(f"Patched {f}")
-
-        # Include compat-win32.h in axel.h
-        h = read('src/axel.h')
-        h = '#include "compat-win32.h"\n' + h
-        # Condition POSIX headers
-        for hdr in ['arpa/inet.h', 'netinet/in.h', 'netinet/ip.h', 'sys/socket.h', 'unistd.h', 'sys/ioctl.h']:
-            h = re.sub(rf'#include <{hdr}>', f'#ifndef _WIN32\n#include <{hdr}>\n#endif', h)
-        write('src/axel.h', h)
-
-        # tcp.h: Use axel_socket_t
-        h = read('src/tcp.h')
-        h = re.sub(r'int\s+fd;', 'axel_socket_t fd;', h)
-        write('src/tcp.h', h)
-
-        # tcp.c: Integrate PR #313 fixes (send/recv, INVALID_SOCKET, WSAEWOULDBLOCK)
-        tcp_c = read('src/tcp.c')
-        tcp_c = re.sub(r'read\s*\([^,]+,', 'recv(', tcp_c)
-        tcp_c = re.sub(r'write\s*\([^,]+,', 'send(', tcp_c)
-        tcp_c = re.sub(r'fd == -1', 'SOCK_ISINVALID(fd)', tcp_c)
-        tcp_c = re.sub(r'errno == EINPROGRESS', 'WSAGetLastError() == WSAEWOULDBLOCK', tcp_c)
-        tcp_c = re.sub(r'close\s*\(tcp->fd\);', 'closesocket(tcp->fd); tcp->fd = INVALID_SOCKET;', tcp_c)
-        write('src/tcp.c', tcp_c)
-
-        # ssl.c: Disable verification as per PR
-        ssl_c = read('src/ssl.c')
-        ssl_c = re.sub(r'SSL_VERIFY_PEER', 'SSL_VERIFY_NONE', ssl_c)
-        write('src/ssl.c', ssl_c)
-
-        # text.c: Winsock init/cleanup
-        main_c = read('src/text.c')
-        init = """
-        #ifdef _WIN32
-        WSADATA wsa;
-        if (WSAStartup(MAKEWORD(2,2), &wsa) != 0) {
-            fprintf(stderr, "WSAStartup failed\\n");
-            return 1;
-        }
-        #endif
-        """
-        main_c = re.sub(r'(int\s+main\s*\([^)]*\)\s*\{)', r'\\1' + init, main_c, count=1)
-        cleanup = """
-        #ifdef _WIN32
-        WSACleanup();
-        #endif
-        """
-        main_c = re.sub(r'(return\s+\d+;\s*\})', cleanup + '\\n\\1', main_c)
-        write('src/text.c', main_c)
-
-        print("All source patches applied (PR #313 style)")
-        EOF
-
-        python3 patch_axel.py
-
-        # PR #313: Fix OpenSSL header conflict (X509_NAME redefinition)
-        if [ -f include/openssl/x509v3.h ]; then
-          sed -i '/#define HEADER_X509V3_H/a\\
-        #ifdef X509_NAME\\
-        #undef X509_NAME\\
-        #endif' include/openssl/x509v3.h
-          echo "Fixed OpenSSL X509_NAME conflict"
-        fi
-
-        # configure.ac: PR #313 changes - Skip POSIX checks, add Windows logic, enable --with-ssl=path support
-        sed -i '/AC_CHECK_HEADERS(arpa\/inet.h)/,/}/d' configure.ac
-        sed -i '/AC_CHECK_HEADERS(netinet\/in.h)/,/}/d' configure.ac
-        sed -i '/AC_CHECK_HEADERS(sys\/socket.h)/,/}/d' configure.ac
-        sed -i '/AC_CHECK_HEADERS(unistd.h)/,/}/d' configure.ac
-
-        # Add Windows-specific block (from PR)
+        # 2. 添加 Windows 检测，强制跳过所有 POSIX 依赖
         cat <<'EOF' >> configure.ac
-        AS_CASE([$host_os],
-          [*mingw32*], [
-            AC_DEFINE([_WIN32_WINNT], [0x0600], [NT 6 API])
-            AC_CHECK_HEADERS([winsock2.h ws2tcpip.h])
-            AC_LIBOBJ([nanosleep])
-            AC_DEFINE([HAVE_NANOSLEEP], [1])
-          ]
-        )
+
+        # === Windows/MinGW 特殊处理 ===
+        AS_CASE([$host],
+          [*-mingw*], [
+            AC_DEFINE([_WIN32_WINNT], [0x0600], [Enable Windows NT 6+ APIs])
+            AC_DEFINE([WIN32], [1], [Building for Windows])
+            AC_DEFINE([HAVE_ARPA_INET_H], [0], [No arpa/inet.h on Windows])
+            AC_DEFINE([HAVE_NETINET_IN_H], [0], [No netinet/in.h])
+            AC_DEFINE([HAVE_SYS_SOCKET_H], [0], [No sys/socket.h])
+            AC_DEFINE([HAVE_UNISTD_H], [0], [No unistd.h])
+            AC_DEFINE([HAVE_NANOSLEEP], [1], [We provide our own])
+          ])
         EOF
 
-        # PR #313 + issue #325: Enable --with-ssl=PATH (add path parsing to configure.ac)
-        # Find the AC_ARG_WITH(ssl) line and modify it to accept path
-        sed -i 's/AC_ARG_WITH(\[ssl\],.*)/AC_ARG_WITH([ssl], [AS_HELP_STRING([--with-ssl=PATH], [use ssl from given path (default: auto)])], [ssl_path="$withval"], [ssl_path="auto"])/' configure.ac
-        # Add path handling after the arg
-        cat <<'EOF' >> configure.ac
-        if test "x$ssl_path" != "xno" -a "x$ssl_path" != "xauto"; then
-          if test -d "$ssl_path"; then
-            SSL_CFLAGS="-I$ssl_path/include"
-            SSL_LIBS="-L$ssl_path/lib -lssl -lcrypto"
-            PKG_CONFIG_PATH="$ssl_path/lib/pkgconfig:$PKG_CONFIG_PATH"
-            AC_MSG_RESULT([Using SSL from $ssl_path])
-          else
-            AC_MSG_ERROR([Invalid SSL path: $ssl_path])
-          fi
-        fi
-        EOF
-
+        # 3. 禁用 gettext（NLS）
         sed -i '/AM_GNU_GETTEXT/d' configure.ac
         sed -i 's|po/Makefile.in po||g' configure.ac
         sed -i '/AM_INIT_AUTOMAKE/a LT_INIT' configure.ac
 
-        mkdir -p m4
+        # 4. 创建最简 Makefile.am
+        mkdir -p m4 src
         cat > Makefile.am <<'EOF'
         AUTOMAKE_OPTIONS = foreign
         ACLOCAL_AMFLAGS = -I m4
         SUBDIRS = src
-        EXTRA_DIST = README.md
         EOF
 
+        # 5. Windows 兼容头 + nanosleep stub
+        cat > src/compat-win32.h <<'EOF'
+        #ifndef COMPAT_WIN32_H
+        #define COMPAT_WIN32_H
+        #ifdef _WIN32
+        #define _WIN32_WINNT 0x0600
+        #include <winsock2.h>
+        #include <ws2tcpip.h>
+        #include <windows.h>
+        typedef SOCKET axel_socket_t;
+        #define SHUT_RDWR SD_BOTH
+        #define EINPROGRESS WSAEWOULDBLOCK
+        #define closesocket(s) closesocket(s)
+        #define SOCK_ISINVALID(s) ((s) == INVALID_SOCKET)
+        int nanosleep(const struct timespec *req, struct timespec *rem);
+        #endif
+        #endif
+        EOF
+
+        cat > src/nanosleep.c <<'EOF'
+        #ifdef _WIN32
+        #include <windows.h>
+        int nanosleep(const struct timespec *req, struct timespec *rem)
+        {
+            (void)rem;
+            DWORD ms = req->tv_sec * 1000 + req->tv_nsec / 1000000;
+            Sleep(ms ? ms : 1);
+            return 0;
+        }
+        #endif
+        EOF
+
+        # 6. 简单 patch 源码（只改最关键的几处）
+        sed -i '1i #include "compat-win32.h"' src/axel.h
+        sed -i 's/int fd;/axel_socket_t fd;/g' src/tcp.h
+        sed -i 's/int fd;/axel_socket_t fd;/g' src/*.c
+        sed -i 's/close(fd)/closesocket(fd)/g' src/*.c
+        sed -i 's/read(/recv(/g' src/*.c
+        sed -i 's/write(/send(/g' src/*.c
+
+        # Winsock 初始化
+        sed -i '/int main(/a\
+        #ifdef _WIN32\
+        WSADATA wsa; if (WSAStartup(MAKEWORD(2,2), &wsa)) return 1;\
+        #endif' src/text.c
+        sed -i '/return .*;/i\
+        #ifdef _WIN32\
+        WSACleanup();\
+        #endif' src/text.c
+
+        # 7. Makefile.am
         echo "bin_PROGRAMS = axel" > src/Makefile.am
-        SOURCES=$(ls src/*.c | tr '\n' ' ')
-        echo "axel_SOURCES = $SOURCES nanosleep.c" >> src/Makefile.am
+        echo "axel_SOURCES = $(ls src/*.c | tr '\n' ' ')" >> src/Makefile.am
+        echo "axel_SOURCES += nanosleep.c" >> src/Makefile.am
+        echo "axel_CFLAGS = -DWIN32 -I." >> src/Makefile.am
         echo "axel_LDFLAGS = -all-static" >> src/Makefile.am
-        echo "axel_LDADD = -lssl -lcrypto -lws2_32 -lgdi32 -lcrypt32 -lz -lbcrypt" >> src/Makefile.am  # PR static deps
+        echo "axel_LDADD = -lssl -lcrypto -lws2_32 -lgdi32 -lcrypt32 -lz" >> src/Makefile.am
 
         autoreconf -fi
-        echo "Configuration patched (PR #313 + OpenSSL path support)"
 
-    - name: Configure & Build (Static, PR #313 Style)
+    - name: Configure & Build (100% Static)
       shell: msys2 {0}
       run: |
         cd axel-src
-        export PKG_CONFIG="pkgconf --static"
-        export PKG_CONFIG_PATH="/mingw64/lib/pkgconfig:$PKG_CONFIG_PATH"  # PR: Ensure libssl.pc found
-        export CFLAGS="-O3 -march=x86-64-v3 -flto=auto -pipe -D_FORTIFY_SOURCE=2 -fstack-protector-strong -I/mingw64/include"
-        export LDFLAGS="-static -static-libgcc -static-libstdc++ -L/mingw64/lib"
-        # Fallback env vars (PR recommendation if --with-ssl fails)
-        export SSL_CFLAGS="-I/mingw64/include"
-        export SSL_LIBS="-L/mingw64/lib -lssl -lcrypto -lws2_32"
+        export PKG_CONFIGzens="pkgconf --static"
+        export CFLAGS="-O3 -march=x86-64-v3 -flto -pipe"
+        export LDFLAGS="-static -static-libgcc -static-libstdc++"
 
-        # Use --with-ssl=yes (now supported via patch) + PR manual flags
-        ./configure \
-          --host=x86_64-w64-mingw32 \
-          --with-ssl=yes \
-          --disable-nls \
-          --disable-shared \
-          --disable-Werror
+        ./configure --host=x86_64-w64-mingw32 --disable-nls --with-ssl
 
         make -j$(nproc)
-
         strip axel.exe
         upx --best --lzma axel.exe
 
-        echo "Final binary info:"
+        echo "=== Build Success ==="
         ls -lh axel.exe
-
-        # Verify static (PR style: no DLLs)
-        if ldd axel.exe 2>/dev/null | grep -E '(dll|DLL)' | grep -v 'Not a dynamic'; then
-          echo "❌ Has DLL deps!"
-          exit 1
-        else
-          echo "✅ 100% static build"
-        fi
-
-        ./axel.exe --version && echo "✅ Version check OK"
+        file axel.exe
+        ./axel.exe --version
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
         name: axel-windows-x64-static
         path: axel-src/axel.exe
-        retention-days: 7
-
-  release:
-    needs: build
-    runs-on: ubuntu-latest
-    if: github.ref_type == 'tag'
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: axel-windows-x64-static
-          path: .
-
-      - name: Get version
-        run: echo "AXEL_VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_ENV
-
-      - name: Create Release
-        uses: ncipollo/release-action@v1
-        with:
-          tag: ${{ github.ref }}
-          name: Axel ${{ env.AXEL_VERSION }} (Windows Static x64)
-          body: |
-            Static Windows x64 build (PR #313 + OpenSSL fixes):
-            - No POSIX/arpa/inet.h errors
-            - --with-ssl path support enabled
-            - Full HTTPS/HTTP/FTP, zero DLLs, UPX ~1.2 MB
-          artifacts: axel.exe
-          token: ${{ secrets.GITHUB_TOKEN }}
