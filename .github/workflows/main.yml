@@ -34,7 +34,6 @@ jobs:
           curl
           wget
           autoconf-archive
-          gnulib
 
     - name: Clone Axel
       shell: msys2 {0}
