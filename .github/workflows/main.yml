@@ -24,7 +24,6 @@ jobs:
           mingw-w64-x86_64-toolchain
           mingw-w64-x86_64-openssl
           mingw-w64-x86_64-upx
-          mingw-w64-x86_64-pthreads
           autoconf
           automake
           libtool
