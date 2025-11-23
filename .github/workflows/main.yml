@@ -1,4 +1,4 @@
-name: Build Axel (Windows Static - Final Working)
+name: Build Axel (Windows Static - Fixed arpa/inet.h)
 
 on:
   push:
@@ -31,75 +31,55 @@ jobs:
             git
             autoconf-archive
 
-      - name: Build Axel (100% Static - Guaranteed Success)
+      - name: Build Axel (Fixed POSIX Headers)
         shell: msys2 {0}
         run: |
           git clone https://github.com/axel-download-accelerator/axel.git axel-src
           cd axel-src
-
-          # 1. 彻底删除 po 目录和所有 gettext 痕迹（解决 po does not exist）
           rm -rf po
-          sed -i '/po\/Makefile/d' configure.ac
-          sed -i '/SUBDIRS.*po/d' Makefile.am 2>/dev/null || true
+
+          # 1. 精确删除 POSIX 检查块（匹配整个 AC_CHECK_HEADERS ... AC_MSG_ERROR）
+          sed -i '/AC_CHECK_HEADERS(\[arpa\/inet\.h/,/AC_MSG_ERROR.*arpa\/inet\.h is required.*)/d' configure.ac
+          sed -i '/AC_CHECK_HEADERS(\[netinet\/in\.h/,/AC_MSG_ERROR.*netinet.*h is required.*)/d' configure.ac
+          sed -i '/AC_CHECK_HEADERS(\[sys\/socket\.h/,/AC_MSG_ERROR.*sys\/socket.*h is required.*)/d' configure.ac
+          sed -i '/AC_CHECK_HEADERS(\[unistd\.h/,/AC_MSG_ERROR.*unistd.*h is required.*)/d' configure.ac
+
+          # 删除 NLS/gettext（避免 po 目录错误）
           sed -i '/AM_GNU_GETTEXT/d' configure.ac
           sed -i '/USE_NLS/d' configure.ac
+          sed -i 's/SUBDIRS = src po/SUBDIRS = src/' Makefile.am || true
 
-          # 2. 删除所有会导致 Windows 报错的 POSIX 检查
-          sed -i '/AC_CHECK_HEADERS.*arpa\/inet\.h/,/arpa\/inet\.h is required/d' configure.ac
-          sed -i '/AC_CHECK_HEADERS.*netinet\/in/,/netinet.*h is required/d' configure.ac
-          sed -i '/AC_CHECK_HEADERS.*sys\/socket/,/sys\/socket.*h is required/d' configure.ac
-          sed -i '/AC_CHECK_HEADERS.*unistd/,/unistd.*h is required/d' configure.ac
+          # 2. 在 configure.ac 开头添加 Windows 检测（强制跳过 POSIX）
+          sed -i '1i AS_CASE([$host_os], [mingw*], [AC_DEFINE([HAVE_ARPA_INET_H], [0]) AC_DEFINE([HAVE_NETINET_IN_H], [0]) AC_DEFINE([HAVE_SYS_SOCKET_H], [0]) AC_DEFINE([HAVE_UNISTD_H], [0]) AC_DEFINE([WIN32], [1]) AC_DEFINE([_WIN32_WINNT], [0x0600])])' configure.ac
 
-          # 3. 强制告诉 configure 我们是 Windows（骗过所有检查）
-          cat >> configure.ac <<'EOF'
-
-          # Windows 专用处理 - 彻底绕过所有 POSIX 检查
-          AC_MSG_NOTICE([*** Building for Windows - skipping POSIX checks ***])
-          AC_DEFINE([WIN32], 1, [Building on Windows])
-          AC_DEFINE([_WIN32_WINNT], [0x0600], [Enable modern Winsock])
-          AC_DEFINE([HAVE_ARPA_INET_H], 0)
-          AC_DEFINE([HAVE_NETINET_IN_H], 0)
-          AC_DEFINE([HAVE_SYS_SOCKET_H], 0)
-          AC_DEFINE([HAVE_UNISTD_H], 0)
-          AC_DEFINE([HAVE_NANOSLEEP], 1)
-          EOF
-
-          # 4. 必须的 libtool 支持
+          # 添加 LT_INIT
           sed -i '/AM_INIT_AUTOMAKE/a LT_INIT' configure.ac
           mkdir -p m4
 
-          # 5. 创建最简顶层 Makefile.am（只包含 src）
-          cat > Makefile.am <<'EOF'
-          AUTOMAKE_OPTIONS = foreign
-          ACLOCAL_AMFLAGS = -I m4
-          SUBDIRS = src
-          EXTRA_DIST = README.md
+          # 3. Python 脚本：条件化源码头文件（#ifndef _WIN32）
+          cat <<'EOF' > patch_headers.py
+          import re, os
+          for root, dirs, files in os.walk('src'):
+              for file in files:
+                  if file.endswith('.h') or file.endswith('.c'):
+                      path = os.path.join(root, file)
+                      with open(path, 'r') as f:
+                          content = f.read()
+                      # 替换 POSIX 头为条件包含
+                      posix_headers = ['arpa/inet.h', 'netinet/in.h', 'netinet/ip.h', 'sys/socket.h', 'sys/ioctl.h', 'unistd.h']
+                      for hdr in posix_headers:
+                          content = re.sub(rf'#include <{hdr}>', f'#ifndef _WIN32\n#include <{hdr}>\n#endif', content)
+                      with open(path, 'w') as f:
+                          f.write(content)
+                      print(f"Patched {path}")
           EOF
+          python3 patch_headers.py
 
-          # 6. Windows 兼容头 + nanosleep
-          cat > src/compat-win32.h <<'EOF'
-          #ifndef COMPAT_WIN32_H
-          #define COMPAT_WIN32_H
-          #ifdef _WIN32
-          #define _WIN32_WINNT 0x0600
-          #include <winsock2.h>
-          #include <ws2tcpip.h>
-          #include <windows.h>
-          typedef SOCKET axel_socket_t;
-          #define SHUT_RDWR SD_BOTH
-          #define EINPROGRESS WSAEWOULDBLOCK
-          #define closesocket(s) closesocket(s)
-          #define SOCK_ISINVALID(s) ((s) == INVALID_SOCKET)
-          int nanosleep(const struct timespec *req, struct timespec *rem);
-          #endif
-          #endif
-          EOF
-
+          # 4. nanosleep stub
           cat > src/nanosleep.c <<'EOF'
           #ifdef _WIN32
           #include <windows.h>
-          int nanosleep(const struct timespec *req, struct timespec *rem)
-          {
+          int nanosleep(const struct timespec *req, struct timespec *rem) {
               (void)rem;
               DWORD ms = (DWORD)(req->tv_sec * 1000 + req->tv_nsec / 1000000);
               Sleep(ms ? ms : 1);
@@ -108,57 +88,53 @@ jobs:
           #endif
           EOF
 
-          # 7. 关键源码替换
-          sed -i '1i #include "compat-win32.h"' src/axel.h
-          sed -i 's/int fd;/axel_socket_t fd;/g' src/tcp.* src/*.c
-          sed -i 's/close(fd)/closesocket(fd)/g' src/*.c
-          sed -i 's/close(tcp->fd)/closesocket(tcp->fd)/g' src/*.c
+          # 5. 替换 socket 函数为 Winsock（sed 简单版）
+          sed -i 's/close(/closesocket(/g' src/*.c
           sed -i 's/read(/recv(/g' src/*.c
           sed -i 's/write(/send(/g' src/*.c
-          sed -i 's/fd == -1/SOCK_ISINVALID(fd)/g' src/*.c
+          sed -i 's/fd == -1/fd == INVALID_SOCKET/g' src/*.c
+          sed -i 's/errno == EINPROGRESS/WSAGetLastError() == WSAEWOULDBLOCK/g' src/*.c
 
-          # Winsock 初始化与清理
-          sed -i '/int main(/a\
-          #ifdef _WIN32\
-          WSADATA wsaData;\
-          if (WSAStartup(MAKEWORD(2,2), &wsaData) != 0) { fprintf(stderr, "WSAStartup failed\\n"); return 1; }\
-          #endif' src/text.c
+          # Winsock init/cleanup in main
+          sed -i '/int main(/a #ifdef _WIN32\nWSADATA wsaData; WSAStartup(MAKEWORD(2,2), &wsaData);\n#endif' src/text.c
+          sed -i '/return /i #ifdef _WIN32\nWSACleanup();\n#endif' src/text.c
 
-          sed -i '/return .*;/i\
-          #ifdef _WIN32\
-          WSACleanup();\
-          #endif' src/text.c
-
-          # 8. src/Makefile.am（100% 静态）
+          # 6. Makefile.am（静态 + Winsock 库）
           cat > src/Makefile.am <<'EOF'
           bin_PROGRAMS = axel
-          axel_SOURCES = $(wildcard src/*.c) nanosleep.c
-          axel_CFLAGS = -DWIN32
+          axel_SOURCES = $(wildcard *.c) nanosleep.c
+          axel_CFLAGS = -DWIN32 -D_HAVE_SSL
           axel_LDFLAGS = -all-static
           axel_LDADD = -lssl -lcrypto -lws2_32 -lgdi32 -lcrypt32 -lz
           EOF
 
-          # 9. 生成 configure（这次一定成功）
+          cat > Makefile.am <<'EOF'
+          AUTOMAKE_OPTIONS = foreign
+          ACLOCAL_AMFLAGS = -I m4
+          SUBDIRS = src
+          EOF
+
+          # 7. 生成 configure
           autoreconf -fi
 
-          # 10. 配置 + 编译
+          # 8. 配置 & 构建
           export PKG_CONFIG="pkgconf --static"
-          export CFLAGS="-O3 -march=x86-64-v3 -flto=auto -pipe"
-          export LDFLAGS="-static -static-libgcc -static-libstdc++"
+          export CFLAGS="-O3 -march=x86-64 -flto=auto -pipe -D_FORTIFY_SOURCE=2"
+          export LDFLAGS="-static -static-libgcc -static-libstdc++ -Wl,--no-undefined"
 
-          ./configure --host=x86_64-w64-mingw32 --with-ssl
+          ./configure --host=x86_64-w64-mingw32 --with-ssl --disable-nls
 
           make -j$(nproc)
-
           strip axel.exe
           upx --best --lzma axel.exe
 
-          echo "Build 成功！"
+          echo "Build success!"
           ls -lh axel.exe
           ./axel.exe --version
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: axel-windows-x64-static
+          name: axel-windows-static
           path: axel-src/axel.exe
+          retention-days: 7
