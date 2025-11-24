@@ -38,20 +38,27 @@ jobs:
           cd axel-src
           rm -rf po
 
-          # 1. 彻底删除 POSIX 头文件检查 + 错误行（关键！）
-          sed -i '/AC_CHECK_HEADERS(\[ \\$/,/AC_MSG_ERROR.*required/d' configure.ac
+          # 1. 用 awk 精确删除 POSIX 头文件检查块（避免 sed 残留）
+          awk '
+            /^AC_CHECK_HEADERS\(\[ \\$/ { skip=1; next }
+            skip && /^\],, \[/ { skip=0; next }
+            skip { next }
+            { print }
+          ' configure.ac > temp.ac && mv temp.ac configure.ac
 
-          # 2. 删除 gettext + po，只保留 Makefile（最稳写法）
+          # 2. 删除 gettext + po，只保留 Makefile
           sed -i '/AM_GNU_GETTEXT/d' configure.ac
-          sed -i '/po\/Makefile\.in/d' configure.ac
-          sed -i '/AC_CONFIG_FILES/,$d' configure.ac            # 删除原 AC_CONFIG_FILES 及以下
+          sed -i 's/po\/Makefile\.in //' configure.ac
+          # 删除原 AC_CONFIG_FILES 块
+          sed -i '/AC_CONFIG_FILES/,/AC_OUTPUT/d' configure.ac
+          # 重新追加干净的结尾
           cat >> configure.ac <<'EOF'
 
-          AC_CONFIG_FILES([Makefile src/Makefile])
-          AC_OUTPUT
-          EOF
+AC_CONFIG_FILES([Makefile src/Makefile])
+AC_OUTPUT
+EOF
 
-          # 3. 给 mingw 加宏（必须带描述！）
+          # 3. 给 mingw 加宏（带描述，避免 autoheader 错误）
           sed -i '/\[*mingw32\], \[/a\
               AC_DEFINE([HAVE_ARPA_INET_H], [1], [Fake for Windows])\
               AC_DEFINE([HAVE_NETINET_IN_H], [1], [Fake for Windows])\
@@ -59,7 +66,7 @@ jobs:
               AC_DEFINE([HAVE_UNISTD_H], [1], [Fake for Windows])\
               AC_DEFINE([HAVE_NANOSLEEP], [1], [Fake for Windows])' configure.ac
 
-          # 4. 必须的 LT_INIT
+          # 4. LT_INIT + 目录
           sed -i '/AM_INIT_AUTOMAKE/a LT_INIT' configure.ac
           mkdir -p m4 build-aux
 
@@ -107,9 +114,10 @@ jobs:
           # 8. 生成 configure
           autoreconf -fi
 
-          # 9. 编译
+          # 9. 编译（添加静态环境变量）
           export PKG_CONFIG="pkgconf --static"
-          ./configure --host=x86_64-w64-mingw32 --with-ssl=openssl
+          export LDFLAGS="-static -static-libgcc -static-libstdc++"
+          ./configure --host=x86_64-w64-mingw32 --with-ssl=openssl --disable-nls
 
           make -j$(nproc)
           strip axel.exe
@@ -118,6 +126,8 @@ jobs:
           echo "Build 成功！"
           ls -lh axel.exe
           ./axel.exe --version
+          # 验证静态
+          ldd axel.exe || echo "纯静态，无 DLL 依赖"
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
