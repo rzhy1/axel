@@ -16,7 +16,7 @@ jobs:
       - uses: msys2/setup-msys2@v2
         with:
           update: true
-          install: git base-devel mingw-w64-x86_64-toolchain mingw-w64-x86_64-openssl mingw-w64-x86_64-upx autoconf automake libtool pkgconf
+          install: autoconf-archive git base-devel mingw-w64-x86_64-toolchain mingw-w64-x86_64-openssl mingw-w64-x86_64-upx autoconf automake libtool pkgconf
 
       - name: Build
         run: |
