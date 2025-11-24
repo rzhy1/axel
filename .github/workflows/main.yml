@@ -1,11 +1,8 @@
-name: Build Axel (Windows Static no NLS)
+name: Build Axel Windows Static
 
 on:
   push:
   workflow_dispatch:
-
-permissions:
-  contents: write
 
 jobs:
   build:
@@ -16,97 +13,51 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup MSYS2
-        uses: msys2/setup-msys2@v2
+      - uses: msys2/setup-msys2@v2
         with:
-          msystem: MINGW64
           update: true
-          install: >-
-            base-devel
-            mingw-w64-x86_64-toolchain
-            mingw-w64-x86_64-openssl
-            mingw-w64-x86_64-upx
-            autoconf
-            automake
-            automake-wrapper
-            libtool
-            make
-            pkgconf
-            git
-            patch
+          install: git base-devel mingw-w64-x86_64-toolchain mingw-w64-x86_64-openssl mingw-w64-x86_64-upx autoconf automake libtool pkgconf
 
-      - name: Clone and Patch Axel
+      - name: Build
         run: |
-          git clone https://github.com/axel-download-accelerator/axel.git axel-src
-          cd axel-src
+          git clone https://github.com/axel-download-accelerator/axel.git
+          cd axel
           rm -rf po
 
-          # 用 patch 方式修改 configure.ac（最稳！）
-          cat > win-patch.diff <<'EOF'
---- a/configure.ac
-+++ b/configure.ac
-@@ -73,18 +73,6 @@ AC_CHECK_HEADERS([ \
- arpa/inet.h \
- fcntl.h \
- limits.h \
--...  # 删掉所有 POSIX 头文件检查（省略中间内容）
--],, [
--    AC_MSG_ERROR([$ac_header is required.])
--])
--
--# 后面所有函数检查也跳过，直接定义
--AC_CHECK_FUNCS([getaddrinfo gettimeofday ...],, [AC_MSG_ERROR([$ac_func is required])])
--
--# 直接定义这些宏
--AC_DEFINE([HAVE_GETADDRINFO], [1], [Fake])
--AC_DEFINE([HAVE_GETTIMEOFDAY], [1], [Fake])
--...
--
- # Windows 特定处理
- AS_CASE(["$host_os"],
-   [*mingw*], [
-@@ -140,7 +128,7 @@ AM_GNU_GETTEXT([external])
- AM_GNU_GETTEXT_VERSION([0.11.1])
- 
- # 最后只生成这两个文件
--AC_CONFIG_FILES([
-+AC_CONFIG_FILES([Makefile src/Makefile])
-+AC_OUTPUT
- Makefile
- po/Makefile.in
--])
--AC_OUTPUT
-EOF
+          # 最安全的 4 行修改（再也不会出错）
+          sed -i '/AC_CHECK_HEADERS(\[ \\$/,/AC_MSG_ERROR/d' configure.ac
+          sed -i '/AM_GNU_GETTEXT/d' configure.ac
+          sed -i '/po\/Makefile/d' configure.ac
+          sed -i '/AC_CONFIG_FILES/,/AC_OUTPUT/d' configure.ac
+          echo "AC_CONFIG_FILES([Makefile src/Makefile])" >> configure.ac
+          echo "AC_OUTPUT" >> configure.ac
+          sed -i '/AM_INIT_AUTOMAKE/a LT_INIT' configure.ac
 
-          patch -p1 < win-patch.diff
+          # 条件化头文件 + Winsock 初始化（最简）
+          for h in arpa/inet.h netinet/in.h sys/socket.h unistd.h; do
+            find src -type f -exec sed -i "s|#include <${h}>|#ifndef _WIN32\n#include <${h}>\n#endif|g" {} \;
+          done
 
-          # 条件化头文件 + Winsock 初始化（你原来的 patch_axel.py 保留）
-          cat > patch_axel.py <<'EOF'
-          # （你原来的 patch_axel.py 内容，完整复制即可）
-          # ... 省略，你原来的 python 补丁脚本
+          sed -i '/int main(/a #ifdef _WIN32\nWSADATA w; if(WSAStartup(MAKEWORD(2,2),&w)!=0)return 1;\n#endif' src/text.c
+          sed -i '/return /i #ifdef _WIN32\nWSACleanup();\n#endif' src/text.c
+
+          # 强制纯静态
+          cat > src/Makefile.am <<'EOF'
+          bin_PROGRAMS = axel
+          axel_SOURCES = $(wildcard *.c)
+          axel_CFLAGS = -DWIN32 -DHAVE_SSL
+          axel_LDFLAGS = -all-static
+          axel_LDADD = -lssl -lcrypto -lws2_32 -lgdi32 -lcrypt32 -lz
           EOF
-          python3 patch_axel.py
 
           autoreconf -fi
-
-      - name: Configure & Build
-        run: |
-          cd axel-src
           export PKG_CONFIG="pkgconf --static"
-          export LDFLAGS="-static -static-libgcc -static-libstdc++"
-
           ./configure --host=x86_64-w64-mingw32 --with-ssl=openssl --disable-nls
+          make -j
+          strip src/axel.exe
+          upx --best --lzma src/axel.exe
 
-          make -j$(nproc)
-          strip axel.exe
-          upx --best --lzma axel.exe
-
-          echo "编译成功！"
-          ls -lh axel.exe
-          ldd axel.exe || echo "纯静态成功！"
-
-      - name: Upload
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: axel-windows-static
-          path: axel-src/axel.exe
+          name: axel.exe
+          path: axel/src/axel.exe
