@@ -47,9 +47,9 @@ jobs:
           sed -i '/AC_CONFIG_FILES/,$d' configure.ac            # 删除原 AC_CONFIG_FILES 及以下
           cat >> configure.ac <<'EOF'
 
-AC_CONFIG_FILES([Makefile src/Makefile])
-AC_OUTPUT
-EOF
+          AC_CONFIG_FILES([Makefile src/Makefile])
+          AC_OUTPUT
+          EOF
 
           # 3. 给 mingw 加宏（必须带描述！）
           sed -i '/\[*mingw32\], \[/a\
