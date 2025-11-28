@@ -1,30 +1,39 @@
-name: Build axel
+name: Build axel (MSYS2)
 on: [push, pull_request]
 
 jobs:
-  build_axel:
+  build_axel_msys2:
     permissions:
       contents: write
     runs-on: windows-latest
     
+    # 关键：指定默认 shell 为 msys2，这样后续步骤都在 MSYS2 环境中运行
+    defaults:
+      run:
+        shell: msys2 {0}
+
     steps:
-    - name: Disable git autocrlf
-      run: git config --global core.autocrlf false
-
-    - name: Checkout
-      uses: actions/checkout@v4
-
-    - name: Set up Cygwin
-      uses: cygwin/cygwin-install-action@master
+    - run: git config --global core.autocrlf false
+    - uses: actions/checkout@v4
+    
+    - name: Set up MSYS2
+      uses: msys2/setup-msys2@v2
       with:
-        # 添加了 gawk 以确保 txt2man 正常工作
-        packages: >
-          make gcc-g++ autoconf automake libtool pkg-config 
-          autoconf-archive gettext gettext-devel libssl-devel 
-          wget gawk
+        # 使用 UCRT64 环境 (推荐) 也可以改成 MINGW64
+        msystem: UCRT64
+        update: true
+        # 安装编译依赖。注意：MinGW 的包名很长，需要准确
+        install: >-
+          git
+          base-devel
+          autotools
+          mingw-w64-ucrt-x86_64-gcc
+          mingw-w64-ucrt-x86_64-openssl
+          mingw-w64-ucrt-x86_64-gettext
+          mingw-w64-ucrt-x86_64-pkg-config
 
     - name: Setup txt2man
-      shell: bash --login --noprofile --norc -euxo pipefail -o igncr -i '{0}'
+      # txt2man 依然是需要的，下载并安装到 /usr/bin
       run: |
         wget https://github.com/mvertes/txt2man/archive/refs/tags/txt2man-1.7.1.tar.gz
         tar -zxvf txt2man-1.7.1.tar.gz
@@ -33,40 +42,45 @@ jobs:
         cp txt2man /usr/bin/
 
     - name: Build axel
-      shell: bash --login --noprofile --norc -euxo pipefail -o igncr -i '{0}'
       run: |
         cd "${{ github.workspace }}"
         autoreconf -ifv
-        # 使用 --prefix=/usr 确保安装路径正常，虽然这里不执行 make install
-        ./configure LIBS=-lintl --disable-nls --disable-Werror --prefix=/usr
+        
+        # 配置编译
+        # --disable-Werror: 防止因警告停止编译
+        # 我们不加 -static 参数，让其默认生成动态链接的 exe
+        ./configure \
+          --prefix=$MINGW_PREFIX \
+          --disable-nls \
+          --disable-Werror
+        
         make
 
-    - name: Bundle DLL dependencies
-      shell: bash --login --noprofile --norc -euxo pipefail -o igncr -i '{0}'
+    - name: Bundle Dependencies (DLLs)
       run: |
         cd "${{ github.workspace }}"
-        # 创建一个发布文件夹
         mkdir -p dist
         cp axel.exe dist/
         
-        # === 关键步骤：自动查找并复制依赖的 DLL ===
-        echo "Finding dependencies..."
-        exe="./dist/axel.exe"
-        # 使用 ldd 找出所有依赖，过滤出 /usr/bin 下的 dll，并复制到 dist 目录
-        ldd "$exe" | grep '/usr/bin/' | awk '{print $3}' | xargs -I '{}' cp '{}' dist/
+        echo "Searching for dependencies..."
+        # 使用 ldd 查找依赖
+        # grep $MINGW_PREFIX: 只筛选 MinGW/UCRT 目录下的 DLL，排除 Windows 系统自带的 (如 kernel32.dll)
+        # awk: 提取路径
+        # xargs: 复制文件
+        ldd axel.exe | grep "$MINGW_PREFIX" | awk '{print $3}' | xargs -I '{}' cp '{}' dist/
         
-        echo "Bundled files:"
+        echo "Bundled content:"
         ls -l dist/
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: axel-build
+        name: axel-msys2-dist
         path: dist/*
 
     - name: Package Release
-      # 此时所有文件都在 dist 文件夹里
-      run: 7z a axel.7z -r dist\*
+      # 此时打包 dist 目录下的所有文件（exe + dlls）
+      run: 7z a axel.7z ./dist/*
       
     - name: Release
       if: startsWith(github.event.ref, 'refs/tags/')
