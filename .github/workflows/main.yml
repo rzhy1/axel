@@ -7,22 +7,23 @@ jobs:
       contents: write
     runs-on: windows-latest
     
-    # 关键：指定默认 shell 为 msys2，这样后续步骤都在 MSYS2 环境中运行
     defaults:
       run:
         shell: msys2 {0}
 
     steps:
-    - run: git config --global core.autocrlf false
+    - name: Disable git autocrlf
+      shell: bash
+      run: git config --global core.autocrlf false
+
     - uses: actions/checkout@v4
     
     - name: Set up MSYS2
       uses: msys2/setup-msys2@v2
       with:
-        # 使用 UCRT64 环境 (推荐) 也可以改成 MINGW64
         msystem: UCRT64
         update: true
-        # 安装编译依赖。注意：MinGW 的包名很长，需要准确
+        # 移除了 wget，因为不需要下载 txt2man 了
         install: >-
           git
           base-devel
@@ -32,28 +33,22 @@ jobs:
           mingw-w64-ucrt-x86_64-gettext
           mingw-w64-ucrt-x86_64-pkg-config
 
-    - name: Setup txt2man
-      # txt2man 依然是需要的，下载并安装到 /usr/bin
+    # ✨ 优化点：不再下载安装 txt2man，而是创建一个“假”命令
+    # 这样 configure 会找到它，make 执行它时也不会报错（虽然生成的文档是空的，但无所谓）
+    - name: Mock txt2man (Skip docs)
       run: |
-        wget https://github.com/mvertes/txt2man/archive/refs/tags/txt2man-1.7.1.tar.gz
-        tar -zxvf txt2man-1.7.1.tar.gz
-        cd txt2man-txt2man-1.7.1
-        chmod +x txt2man
-        cp txt2man /usr/bin/
+        echo '#!/bin/sh' > /usr/bin/txt2man
+        echo 'true' >> /usr/bin/txt2man
+        chmod +x /usr/bin/txt2man
 
     - name: Build axel
       run: |
         cd "${{ github.workspace }}"
         autoreconf -ifv
-        
-        # 配置编译
-        # --disable-Werror: 防止因警告停止编译
-        # 我们不加 -static 参数，让其默认生成动态链接的 exe
         ./configure \
           --prefix=$MINGW_PREFIX \
           --disable-nls \
           --disable-Werror
-        
         make
 
     - name: Bundle Dependencies (DLLs)
@@ -63,10 +58,7 @@ jobs:
         cp axel.exe dist/
         
         echo "Searching for dependencies..."
-        # 使用 ldd 查找依赖
-        # grep $MINGW_PREFIX: 只筛选 MinGW/UCRT 目录下的 DLL，排除 Windows 系统自带的 (如 kernel32.dll)
-        # awk: 提取路径
-        # xargs: 复制文件
+        # 自动提取依赖 DLL
         ldd axel.exe | grep "$MINGW_PREFIX" | awk '{print $3}' | xargs -I '{}' cp '{}' dist/
         
         echo "Bundled content:"
@@ -79,8 +71,8 @@ jobs:
         path: dist/*
 
     - name: Package Release
-      # 此时打包 dist 目录下的所有文件（exe + dlls）
-      run: 7z a axel.7z ./dist/*
+      shell: cmd
+      run: 7z a axel.7z .\dist\*
       
     - name: Release
       if: startsWith(github.event.ref, 'refs/tags/')
