@@ -15,7 +15,7 @@ jobs:
         packages: make gcc-g++ autoconf automake libtool pkg-config autoconf-archive gettext gettext-devel libssl-devel wget
         
     - name: Setup txt2man
-      shell: bash --login --noprofile --norc -euxo pipefail -o igncr -i '{0}'
+      shell: bash
       run: |
         wget https://github.com/mvertes/txt2man/archive/refs/tags/txt2man-1.7.1.tar.gz
         tar -zxvf txt2man-1.7.1.tar.gz
@@ -23,7 +23,7 @@ jobs:
         cp txt2man /cygdrive/c/cygwin/bin
         
     - name: Build axel
-      shell: bash --login --noprofile --norc -euxo pipefail -o igncr -i '{0}'
+      shell: bash
       run: |
         cd "${{ github.workspace }}"
         autoreconf -ifv
