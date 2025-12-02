@@ -1,95 +1,47 @@
-name: Build Axel (Windows x64 Static, Full)
+name: Build Axel Static
 
 on:
   push:
-    branches: [ main ]
-  pull_request:
     branches: [ main ]
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: windows-latest
-    name: Build Axel (Windows x64 Static)
-    
+    defaults:
+      run:
+        shell: msys2 {0}
+        msystem: MINGW64 # 关键：锁定为MINGW64环境
+
     steps:
-    # 1. 检出代码
-    - name: Checkout repository
-      uses: actions/checkout@v4
+    - uses: actions/checkout@v4
 
-    # 2. 设置MSYS2
-    - name: Setup MSYS2
-      uses: msys2/setup-msys2@v2
-      with:
-        msystem: MINGW64
-        update: true
-        install: >-
-          base-devel
-          mingw-w64-x86_64-toolchain
-          autoconf
-          automake
-          autoconf-archive
-          libtool
-          pkgconf
-          gettext-devel
-          git
-          curl
-          wget
-          mingw-w64-x86_64-openssl
-
-    # 3. 安装WinLibs GCC 16（可选，或者直接使用MSYS2的GCC）
-    - name: Install WinLibs GCC 16
-      shell: cmd
+    - name: Setup MSYS2 and MINGW64 toolchain
       run: |
-        curl -L -o winlibs.zip "https://github.com/brechtsanders/winlibs_mingw/releases/download/16.0.0-snapshot20251026posix-14.0.0-ucrt-r1/winlibs-x86_64-posix-seh-gcc-16.0.0-snapshot20251026-mingw-w64ucrt-14.0.0-r1.zip"
-        7z x winlibs.zip -oC:\winlibs
-        echo "C:\winlibs\mingw64\bin" >> "%GITHUB_PATH%"
+        pacman -Syu --noconfirm
+        pacman -S --needed --noconfirm \
+          mingw-w64-x86_64-toolchain \
+          autoconf-archive \
+          mingw-w64-x86_64-openssl \
+          autoconf automake libtool pkgconf make
 
-    # 4. 下载Axel源码
-    - name: Download Axel release
-      shell: msys2 {0}
+    - name: Download and extract source
       run: |
-        curl -L -o axel-2.17.14.tar.xz https://github.com/axel-download-accelerator/axel/releases/download/v2.17.14/axel-2.17.14.tar.xz
-        tar -xJf axel-2.17.14.tar.xz
+        curl -L -o axel.tar.xz https://github.com/axel-download-accelerator/axel/releases/download/v2.17.14/axel-2.17.14.tar.xz
+        tar -xJf axel.tar.xz
         mv axel-2.17.14 axel-src
 
-    # 5. 构建准备
-    - name: Autoreconf
-      shell: msys2 {0}
+    - name: Configure and Build (Static)
       run: |
         cd axel-src
         autoreconf -vfi
-
-    # 6. 配置
-    - name: Configure
-      shell: msys2 {0}
-      run: |
-        cd axel-src
-        export PATH="/c/winlibs/mingw64/bin:$PATH"
-        ./configure \
-          --host=x86_64-w64-mingw32 \
-          --disable-nls \
-          --with-ssl=openssl \
-          CFLAGS="-O2 -static -D_WIN32_WINNT=0x0600" \
-          LDFLAGS="-static -lws2_32 -lcrypt32 -lssl -lcrypto"
-
-    # 7. 编译
-    - name: Build Axel
-      shell: msys2 {0}
-      run: |
-        cd axel-src
-        export PATH="/c/winlibs/mingw64/bin:$PATH"
+        ./configure --host=x86_64-w64-mingw32 --disable-nls --with-ssl=openssl \
+          CFLAGS="-O2 -static" \
+          LDFLAGS="-static -lssl -lcrypto -lws2_32"
         make -j$(nproc)
-        # 检查是否为静态链接
-        file src/axel.exe
-        # 剥离调试信息
-        x86_64-w64-mingw32-strip src/axel.exe
-        echo "✅ Build finished"
+        strip src/axel.exe
 
-    # 8. 上传制品
-    - name: Upload artifact
-      uses: actions/upload-artifact@v4
+    - uses: actions/upload-artifact@v4
       with:
-        name: axel-windows-static
+        name: axel-static-windows
         path: axel-src/src/axel.exe
-        retention-days: 1
