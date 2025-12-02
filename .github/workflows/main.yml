@@ -1,83 +1,94 @@
-name: Build axel (MSYS2)
-on: [push, pull_request]
+name: Build Axel (Windows x64 Static, Full)
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
 
 jobs:
-  build_axel_msys2:
-    permissions:
-      contents: write
+  build:
     runs-on: windows-latest
+    name: Build Axel (Windows x64 Static)
     
-    defaults:
-      run:
-        shell: msys2 {0}
-
     steps:
-    - name: Disable git autocrlf
-      shell: bash
-      run: git config --global core.autocrlf false
+    # 1. 检出代码
+    - name: Checkout repository
+      uses: actions/checkout@v4
 
-    - uses: actions/checkout@v4
-    
-    - name: Set up MSYS2
+    # 2. 设置MSYS2
+    - name: Setup MSYS2
       uses: msys2/setup-msys2@v2
       with:
-        msystem: UCRT64
+        msystem: MINGW64
         update: true
-        # 移除了 wget，因为不需要下载 txt2man 了
         install: >-
-          git
           base-devel
-          autotools
-          mingw-w64-ucrt-x86_64-gcc
-          mingw-w64-ucrt-x86_64-openssl
-          mingw-w64-ucrt-x86_64-gettext
-          mingw-w64-ucrt-x86_64-pkg-config
+          mingw-w64-x86_64-toolchain
+          autoconf
+          automake
+          libtool
+          pkgconf
+          gettext-devel
+          git
+          curl
+          wget
+          mingw-w64-x86_64-openssl
 
-    # ✨ 优化点：不再下载安装 txt2man，而是创建一个“假”命令
-    # 这样 configure 会找到它，make 执行它时也不会报错（虽然生成的文档是空的，但无所谓）
-    - name: Mock txt2man (Skip docs)
+    # 3. 安装WinLibs GCC 16（可选，或者直接使用MSYS2的GCC）
+    - name: Install WinLibs GCC 16
+      shell: cmd
       run: |
-        echo '#!/bin/sh' > /usr/bin/txt2man
-        echo 'true' >> /usr/bin/txt2man
-        chmod +x /usr/bin/txt2man
+        curl -L -o winlibs.zip "https://github.com/brechtsanders/winlibs_mingw/releases/download/16.0.0-snapshot20251026posix-14.0.0-ucrt-r1/winlibs-x86_64-posix-seh-gcc-16.0.0-snapshot20251026-mingw-w64ucrt-14.0.0-r1.zip"
+        7z x winlibs.zip -oC:\winlibs
+        echo "C:\winlibs\mingw64\bin" >> "%GITHUB_PATH%"
 
-    - name: Build axel
+    # 4. 下载Axel源码
+    - name: Download Axel release
+      shell: msys2 {0}
       run: |
-        cd "${{ github.workspace }}"
-        autoreconf -ifv
+        curl -L -o axel-2.17.14.tar.xz https://github.com/axel-download-accelerator/axel/releases/download/v2.17.14/axel-2.17.14.tar.xz
+        tar -xJf axel-2.17.14.tar.xz
+        mv axel-2.17.14 axel-src
+
+    # 5. 构建准备
+    - name: Autoreconf
+      shell: msys2 {0}
+      run: |
+        cd axel-src
+        autoreconf -vfi
+
+    # 6. 配置
+    - name: Configure
+      shell: msys2 {0}
+      run: |
+        cd axel-src
+        export PATH="/c/winlibs/mingw64/bin:$PATH"
         ./configure \
-          --prefix=$MINGW_PREFIX \
+          --host=x86_64-w64-mingw32 \
           --disable-nls \
-          --disable-Werror
-        make
+          --with-ssl=openssl \
+          CFLAGS="-O2 -static -D_WIN32_WINNT=0x0600" \
+          LDFLAGS="-static -lws2_32 -lcrypt32 -lssl -lcrypto"
 
-    - name: Bundle Dependencies (DLLs)
+    # 7. 编译
+    - name: Build Axel
+      shell: msys2 {0}
       run: |
-        cd "${{ github.workspace }}"
-        mkdir -p dist
-        cp axel.exe dist/
-        
-        echo "Searching for dependencies..."
-        # 自动提取依赖 DLL
-        ldd axel.exe | grep "$MINGW_PREFIX" | awk '{print $3}' | xargs -I '{}' cp '{}' dist/
-        
-        echo "Bundled content:"
-        ls -l dist/
+        cd axel-src
+        export PATH="/c/winlibs/mingw64/bin:$PATH"
+        make -j$(nproc)
+        # 检查是否为静态链接
+        file src/axel.exe
+        # 剥离调试信息
+        x86_64-w64-mingw32-strip src/axel.exe
+        echo "✅ Build finished"
 
-    - name: Upload Artifact
+    # 8. 上传制品
+    - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: axel-msys2-dist
-        path: dist/*
-
-    - name: Package Release
-      shell: cmd
-      run: 7z a axel.7z .\dist\*
-      
-    - name: Release
-      if: startsWith(github.event.ref, 'refs/tags/')
-      uses: softprops/action-gh-release@v1
-      with:
-        draft: false
-        prerelease: false
-        files: axel.7z
+        name: axel-windows-static
+        path: axel-src/src/axel.exe
+        retention-days: 1
