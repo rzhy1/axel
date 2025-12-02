@@ -1,8 +1,6 @@
-name: Build Axel Static
+name: Build Axel (Static Windows)
 
 on:
-  push:
-    branches: [ main ]
   workflow_dispatch:
 
 jobs:
@@ -11,23 +9,31 @@ jobs:
     defaults:
       run:
         shell: msys2 {0}
-        msystem: MINGW64 # 关键：锁定为MINGW64环境
 
     steps:
     - uses: actions/checkout@v4
 
-    - name: Setup MSYS2 and MINGW64 toolchain
-      run: |
-        pacman -Syu --noconfirm
-        pacman -S --needed --noconfirm \
-          mingw-w64-x86_64-toolchain \
-          autoconf-archive \
-          mingw-w64-x86_64-openssl \
-          autoconf automake libtool pkgconf make
+    - name: Setup MSYS2 and Toolchain
+      uses: msys2/setup-msys2@v2
+      with:
+        # 关键：这里指定使用 MINGW64 子系统
+        msystem: MINGW64
+        update: true
+        install: >-
+          mingw-w64-x86_64-toolchain
+          autoconf-archive
+          mingw-w64-x86_64-openssl
+          autoconf
+          automake
+          libtool
+          pkgconf
+          make
+          tar
+          curl
 
-    - name: Download and extract source
+    - name: Download and Extract Axel Source
       run: |
-        curl -L -o axel.tar.xz https://github.com/axel-download-accelerator/axel/releases/download/v2.17.14/axel-2.17.14.tar.xz
+        curl -sL -o axel.tar.xz https://github.com/axel-download-accelerator/axel/releases/download/v2.17.14/axel-2.17.14.tar.xz
         tar -xJf axel.tar.xz
         mv axel-2.17.14 axel-src
 
@@ -37,11 +43,13 @@ jobs:
         autoreconf -vfi
         ./configure --host=x86_64-w64-mingw32 --disable-nls --with-ssl=openssl \
           CFLAGS="-O2 -static" \
-          LDFLAGS="-static -lssl -lcrypto -lws2_32"
+          LDFLAGS="-static"
         make -j$(nproc)
         strip src/axel.exe
+        # 验证是否为静态链接
+        file src/axel.exe
 
     - uses: actions/upload-artifact@v4
       with:
-        name: axel-static-windows
+        name: axel-windows-static
         path: axel-src/src/axel.exe
