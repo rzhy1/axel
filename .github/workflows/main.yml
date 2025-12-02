@@ -28,6 +28,7 @@ jobs:
           mingw-w64-x86_64-toolchain
           autoconf
           automake
+          autoconf-archive
           libtool
           pkgconf
           gettext-devel
