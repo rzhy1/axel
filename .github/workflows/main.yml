@@ -29,6 +29,7 @@ jobs:
           patch
           pkgconf
           gettext
+          mingw-w64-x86_64-libiconv
 
     - name: Clone Axel source
       shell: msys2 {0}
@@ -71,37 +72,47 @@ jobs:
         sed -i 's/ po//' Makefile.am
         sed -i 's/ doc//' Makefile.am
         
-        # 5. 使用正确的方法添加 ACLOCAL_AMFLAGS，保持制表符格式
-        if ! grep -q 'ACLOCAL_AMFLAGS' Makefile.am; then
-          echo "" >> Makefile.am
-          echo "# 添加 m4 宏目录" >> Makefile.am
-          echo "ACLOCAL_AMFLAGS = -I m4" >> Makefile.am
-        fi
+        # 5. 移除 gettext 支持，避免它查找 po 目录
+        sed -i '/AM_GNU_GETTEXT/d' configure.ac
+        sed -i '/AC_CONFIG_FILES.*po\/Makefile.in/d' configure.ac
         
-        # 6. 创建 m4 目录
-        mkdir -p m4
-
-        # 7. 为 Windows 添加一个假的 O_NONBLOCK 定义，以满足脚本逻辑
-        echo '' >> configure.ac
-        echo '# 为 Windows 定义假的 O_NONBLOCK' >> configure.ac
-        echo 'AS_IF([test "$host_os" = "mingw32"], [AC_DEFINE([O_NONBLOCK], [0], [Fake O_NONBLOCK for Windows])])' >> configure.ac
-
-        # 8. 确保 SUBDIRS 变量格式正确
+        # 6. 确保 SUBDIRS 变量格式正确
         sed -i '/^SUBDIRS = /s/  */ /g' Makefile.am
+        
+        # 7. 确保添加 LT_INIT 用于 libtool
+        if ! grep -q 'LT_INIT' configure.ac; then
+          sed -i '/AM_INIT_AUTOMAKE/a LT_INIT' configure.ac
+        fi
+
+    - name: Prepare build-aux directory
+      shell: msys2 {0}
+      run: |
+        cd axel-src
+        # 创建必要的目录结构
+        mkdir -p build-aux m4
+        
+        # 获取必要的 Autotools 辅助文件
+        automake --add-missing --copy --force-missing 2>/dev/null || true
+        libtoolize --force --copy --install 2>/dev/null || true
 
     - name: Regenerate configure scripts
       shell: msys2 {0}
       run: |
         cd axel-src
-        # 确保 autotools 文件存在
-        touch configure.ac Makefile.am
-        # 清理旧文件
-        rm -f aclocal.m4 configure Makefile.in
-        # 重新生成
-        aclocal -I m4
-        autoheader
-        automake --add-missing --copy
-        autoconf
+        
+        # 确保所有必要的文件都存在
+        touch README.md AUTHORS NEWS ChangeLog 2>/dev/null || true
+        
+        # 重新生成配置系统
+        autoreconf -fiv
+        
+        # 验证 configure 脚本已生成
+        if [ -f configure ]; then
+          echo "✅ configure script generated successfully"
+        else
+          echo "❌ Failed to generate configure script"
+          exit 1
+        fi
 
     - name: Configure for Windows build
       shell: msys2 {0}
@@ -154,14 +165,13 @@ jobs:
           --host=x86_64-w64-mingw32 \
           --disable-doc \
           --disable-nls \
-          --disable-dependency-tracking
+          --disable-dependency-tracking \
+          --prefix=/usr
 
     - name: Build Axel
       shell: msys2 {0}
       run: |
         cd axel-src
-        # 先检查 Makefile 格式
-        head -n 20 Makefile
         # 构建
         make -j$(nproc) \
           CFLAGS="-static -DWIN32 -include winsock2.h -include ws2tcpip.h" \
