@@ -1,8 +1,8 @@
-name: Build Axel (Windows Compatibility)
+name: Build Axel Windows Static
 
 on:
-  push:
   workflow_dispatch:
+  push:
 
 jobs:
   build:
@@ -12,209 +12,65 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    - name: Setup MSYS2 environment
+    - name: Setup MSYS2
       uses: msys2/setup-msys2@v2
       with:
         update: true
-        install: |
+        install: >
           base-devel
           mingw-w64-x86_64-toolchain
-          make
           autoconf
           automake
-          autoconf-archive
           libtool
-          git
+          make
+          pkgconf
           wget
           patch
-          pkgconf
 
-    - name: Clone Axel source
+    - name: Extract patched Axel source
       shell: msys2 {0}
       run: |
-        git clone https://github.com/axel-download-accelerator/axel.git axel-src
-        cd axel-src
-        git log -1 --oneline
+        mkdir axel-src
+        tar -xzf axel-windows-patched.tar.gz -C axel-src --strip-components=1
+        ls -l axel-src
 
-    - name: Apply Windows CI patch
-      shell: msys2 {0}
-      run: |
-        cd axel-src
-
-        # --- 首先删除 po 目录以避免任何引用问题 ---
-        rm -rf po doc
-
-        # --- C 语言级别编译补丁 ---
-        sed -i '/#include <netinet\/in_systm.h>/i #ifndef WIN32' src/axel.h
-        sed -i '/#include <netinet\/in_systm.h>/a #endif' src/axel.h
-        sed -i '/#include <netinet\/in.h>/i #ifndef WIN32' src/axel.h
-        sed -i '/#include <netinet\/in.h>/a #endif' src/axel.h
-        sed -i '/#include <netinet\/ip.h>/i #ifndef WIN32' src/axel.h
-        sed -i '/#include <netinet\/ip.h>/a #endif' src/axel.h
-        sed -i '/#include <arpa\/inet.h>/i #ifndef WIN32' src/axel.h
-        sed -i '/#include <arpa\/inet.h>/a #endif' src/axel.h
-        
-        # --- Autotools 配置脚本生成补丁 ---
-        # 1. 添加 AC_USE_SYSTEM_EXTENSIONS 宏以解决警告
-        sed -i '/AC_INIT/a AC_USE_SYSTEM_EXTENSIONS' configure.ac
-        
-        # 2. 彻底移除所有有问题的头文件检查
-        sed -i '/arpa\/inet\.h/d' configure.ac
-        sed -i '/netinet\/in\.h/d' configure.ac
-        sed -i '/unistd\.h/d' configure.ac
-        sed -i '/netdb\.h/d' configure.ac
-        sed -i '/sys\/ioctl\.h/d' configure.ac
-        sed -i '/sys\/socket\.h/d' configure.ac
-        
-        # 3. 彻底移除 O_NONBLOCK 宏的检查，避免其报错
-        sed -i '/AXEL_CHECK_MACRO(\[O_NONBLOCK\]/d' configure.ac
-
-        # 4. 移除导致 configure 语法错误的多行 _WIN32_WINNT 定义
-        sed -i '/AC_DEFINE(\[_WIN32_WINNT\]/{N;d;}' configure.ac
-
-        # 5. 彻底移除所有 gettext 相关配置
-        sed -i '/AM_GNU_GETTEXT/d' configure.ac
-        sed -i '/AM_GNU_GETTEXT_VERSION/d' configure.ac
-        sed -i '/AC_SUBST.*INTLLIBS/d' configure.ac
-        sed -i '/AC_SUBST.*LTLIBINTL/d' configure.ac
-        
-        # 6. 移除 po 目录的所有配置引用
-        sed -i '/po\/Makefile.in/d' configure.ac
-        sed -i '/po\/Makefile.in.in/d' configure.ac
-        sed -i '/AC_CONFIG_FILES.*po/d' configure.ac
-        
-        # 7. 从 SUBDIRS 中移除 po 和 doc
-        sed -i 's/ po//g' Makefile.am
-        sed -i 's/ doc//g' Makefile.am
-        
-        # 8. 确保 SUBDIRS 变量格式正确
-        sed -i '/^SUBDIRS = /s/  */ /g' Makefile.am
-        sed -i '/^SUBDIRS = /s/ $//' Makefile.am
-        
-        # 9. 添加 LT_INIT 用于 libtool（如果还没有）
-        if ! grep -q 'LT_INIT' configure.ac; then
-          sed -i '/AM_INIT_AUTOMAKE/a LT_INIT' configure.ac
-        fi
-        
-        # 10. 移除 AC_CONFIG_HEADER 中可能的多余内容
-        sed -i 's/AC_CONFIG_HEADER.*/AC_CONFIG_HEADER([config.h])/' configure.ac
-
-    - name: Prepare autotools environment
+    - name: Prepare autotools
       shell: msys2 {0}
       run: |
         cd axel-src
-        # 创建必要的目录结构
+
+        # 确保 autotools 基础文件齐全
         mkdir -p build-aux m4
-        
-        # 清理旧的 autotools 生成文件
-        rm -f aclocal.m4 configure config.h.in Makefile.in
-        rm -rf autom4te.cache
-        
-        # 运行 libtoolize 生成 ltmain.sh
+
         libtoolize --force --copy --install
-        
-        # 运行 aclocal 生成 aclocal.m4
         aclocal -I m4
-        
-        # 运行 autoheader 生成 config.h.in
-        autoheader --force
-        
-        # 确保 config.h.in 已创建
-        if [ ! -f config.h.in ]; then
-          echo "Warning: config.h.in not created, creating empty one"
-          touch config.h.in
-        fi
+        autoheader
+        automake --add-missing --copy --force-missing --no-dependencies
+        autoconf
 
-    - name: Regenerate configure scripts
+    - name: Configure (MinGW)
       shell: msys2 {0}
       run: |
         cd axel-src
-        
-        # 确保所有必要的文件都存在
-        touch README AUTHORS NEWS ChangeLog 2>/dev/null || true
-        
-        # 运行 automake 生成 Makefile.in
-        automake --add-missing --copy --force-missing
-        
-        # 运行 autoconf 生成 configure
-        autoconf --force
-        
-        # 验证必要的文件已生成
-        echo "Checking generated files:"
-        ls -la configure config.h.in Makefile.in 2>/dev/null || true
-        ls -la build-aux/ltmain.sh 2>/dev/null || true
 
-    - name: Configure for Windows build
-      shell: msys2 {0}
-      run: |
-        cd axel-src
-        
-        # 确保 build-aux 目录存在必要的文件
-        if [ ! -f build-aux/config.guess ]; then
-          wget -O build-aux/config.guess "https://git.savannah.gnu.org/cgit/config.git/plain/config.guess"
-          wget -O build-aux/config.sub "https://git.savannah.gnu.org/cgit/config.git/plain/config.sub"
-        fi
-        
-        # 清理旧配置
-        rm -f config.cache config.log config.status
-        
-        # 设置缓存变量以绕过检查
-        export ac_cv_header_arpa_inet_h=no
-        export ac_cv_header_netinet_in_h=no
-        export ac_cv_header_netinet_in_systm_h=no
-        export ac_cv_header_netinet_ip_h=no
-        export ac_cv_header_unistd_h=no
-        export ac_cv_header_netdb_h=no
-        export ac_cv_header_sys_ioctl_h=no
-        export ac_cv_header_sys_socket_h=no
-        
-        # 函数检查
-        export ac_cv_func_getaddrinfo=yes
-        export ac_cv_func_gettimeofday=yes
-        export ac_cv_func_inet_ntoa=yes
-        export ac_cv_func_malloc=yes
-        export ac_cv_func_memset=yes
-        export ac_cv_func_nanosleep=yes
-        export ac_cv_func_realloc=yes
-        export ac_cv_func_select=yes
-        export ac_cv_func_setlocale=yes
-        export ac_cv_func_socket=yes
-        export ac_cv_func_strcasecmp=yes
-        export ac_cv_func_strchr=yes
-        export ac_cv_func_strerror=yes
-        export ac_cv_func_strncasecmp=yes
-        export ac_cv_func_strpbrk=yes
-        export ac_cv_func_strrchr=yes
-        export ac_cv_func_strstr=yes
-        export ac_cv_func_strtoul=yes
-        export ac_cv_func_strtoll=yes
-
-        # O_NONBLOCK 宏检查
-        export ax_cv_macro_O_NONBLOCK=yes
-
-        # 配置构建
         ./configure \
           --host=x86_64-w64-mingw32 \
           --disable-nls \
-          --disable-dependency-trackin \
+          --disable-dependency-tracking \
           --prefix=/usr/local
 
-    - name: Build Axel
+    - name: Build static axel.exe
       shell: msys2 {0}
       run: |
         cd axel-src
-        # 构建
+
         make -j$(nproc) \
-          CFLAGS="-static -DWIN32 -D_GNU_SOURCE -include winsock2.h -include ws2tcpip.h" \
+          CFLAGS="-static -O2 -DWIN32 -D_GNU_SOURCE -include winsock2.h -include ws2tcpip.h" \
           LIBS="-lws2_32 -lssl -lcrypto -lcrypt32"
 
-    - name: Verify binary
-      shell: cmd
-      run: |
-        cd axel-src\src
-        .\axel.exe --version || echo "✅ Build OK"
+        file src/axel.exe || true
 
-    - name: Upload artifact
+    - name: Upload
       uses: actions/upload-artifact@v4
       with:
         name: axel-windows-static
