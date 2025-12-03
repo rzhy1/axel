@@ -196,6 +196,7 @@ jobs:
         ./configure \
           --host=x86_64-w64-mingw32 \
           --disable-nls \
+          --disable-dependency-trackin \
           --prefix=/usr/local
 
     - name: Build Axel
