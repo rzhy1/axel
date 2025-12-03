@@ -28,8 +28,6 @@ jobs:
           wget
           patch
           pkgconf
-          gettext
-          mingw-w64-x86_64-libiconv
 
     - name: Clone Axel source
       shell: msys2 {0}
@@ -42,6 +40,9 @@ jobs:
       shell: msys2 {0}
       run: |
         cd axel-src
+
+        # --- 首先删除 po 目录以避免任何引用问题 ---
+        rm -rf po doc
 
         # --- C 语言级别编译补丁 ---
         sed -i '/#include <netinet\/in_systm.h>/i #ifndef WIN32' src/axel.h
@@ -68,18 +69,26 @@ jobs:
         # 3. 移除导致 configure 语法错误的多行 _WIN32_WINNT 定义
         sed -i '/AC_DEFINE(\[_WIN32_WINNT\]/{N;d;}' configure.ac
 
-        # 4. 从构建中彻底移除 po 和 doc 目录
-        sed -i 's/ po//' Makefile.am
-        sed -i 's/ doc//' Makefile.am
-        
-        # 5. 移除 gettext 支持，避免它查找 po 目录
+        # 4. 彻底移除所有 gettext 相关配置
         sed -i '/AM_GNU_GETTEXT/d' configure.ac
-        sed -i '/AC_CONFIG_FILES.*po\/Makefile.in/d' configure.ac
+        sed -i '/AM_GNU_GETTEXT_VERSION/d' configure.ac
+        sed -i '/AC_SUBST.*INTLLIBS/d' configure.ac
+        sed -i '/AC_SUBST.*LTLIBINTL/d' configure.ac
         
-        # 6. 确保 SUBDIRS 变量格式正确
+        # 5. 移除 po 目录的所有配置引用
+        sed -i '/po\/Makefile.in/d' configure.ac
+        sed -i '/po\/Makefile.in.in/d' configure.ac
+        sed -i '/AC_CONFIG_FILES.*po/d' configure.ac
+        
+        # 6. 从 SUBDIRS 中移除 po 和 doc
+        sed -i 's/ po//g' Makefile.am
+        sed -i 's/ doc//g' Makefile.am
+        
+        # 7. 确保 SUBDIRS 变量格式正确
         sed -i '/^SUBDIRS = /s/  */ /g' Makefile.am
+        sed -i '/^SUBDIRS = /s/ $//' Makefile.am
         
-        # 7. 确保添加 LT_INIT 用于 libtool
+        # 8. 添加 LT_INIT 用于 libtool
         if ! grep -q 'LT_INIT' configure.ac; then
           sed -i '/AM_INIT_AUTOMAKE/a LT_INIT' configure.ac
         fi
@@ -92,8 +101,12 @@ jobs:
         mkdir -p build-aux m4
         
         # 获取必要的 Autotools 辅助文件
-        automake --add-missing --copy --force-missing 2>/dev/null || true
-        libtoolize --force --copy --install 2>/dev/null || true
+        wget -O build-aux/compile "https://git.savannah.gnu.org/cgit/automake.git/plain/lib/compile"
+        wget -O build-aux/depcomp "https://git.savannah.gnu.org/cgit/automake.git/plain/lib/depcomp"
+        wget -O build-aux/install-sh "https://git.savannah.gnu.org/cgit/automake.git/plain/lib/install-sh"
+        wget -O build-aux/missing "https://git.savannah.gnu.org/cgit/automake.git/plain/lib/missing"
+        wget -O build-aux/config.guess "https://git.savannah.gnu.org/cgit/config.git/plain/config.guess"
+        wget -O build-aux/config.sub "https://git.savannah.gnu.org/cgit/config.git/plain/config.sub"
 
     - name: Regenerate configure scripts
       shell: msys2 {0}
@@ -101,10 +114,12 @@ jobs:
         cd axel-src
         
         # 确保所有必要的文件都存在
-        touch README.md AUTHORS NEWS ChangeLog 2>/dev/null || true
+        touch README AUTHORS NEWS ChangeLog 2>/dev/null || true
         
-        # 重新生成配置系统
-        autoreconf -fiv
+        # 重新生成配置系统（使用更简单的方法）
+        aclocal -I m4
+        autoconf
+        automake --add-missing --copy --force-missing
         
         # 验证 configure 脚本已生成
         if [ -f configure ]; then
@@ -119,10 +134,6 @@ jobs:
       run: |
         cd axel-src
         
-        # 更新 config.guess 和 config.sub 以支持最新平台
-        wget -O build-aux/config.sub "http://git.savannah.gnu.org/cgit/config.git/plain/config.sub"
-        wget -O build-aux/config.guess "http://git.savannah.gnu.org/cgit/config.git/plain/config.guess"
-
         # 清理旧配置
         rm -f config.cache config.log config.status
         
@@ -160,13 +171,11 @@ jobs:
         # O_NONBLOCK 宏检查
         export ax_cv_macro_O_NONBLOCK=yes
 
-        # 配置构建
+        # 配置构建（使用更简单的配置选项）
         ./configure \
           --host=x86_64-w64-mingw32 \
-          --disable-doc \
           --disable-nls \
-          --disable-dependency-tracking \
-          --prefix=/usr
+          --prefix=/usr/local
 
     - name: Build Axel
       shell: msys2 {0}
@@ -174,8 +183,8 @@ jobs:
         cd axel-src
         # 构建
         make -j$(nproc) \
-          CFLAGS="-static -DWIN32 -include winsock2.h -include ws2tcpip.h" \
-          LIBS="-lws2_32 -lssl -lcrypto"
+          CFLAGS="-static -DWIN32 -D_GNU_SOURCE -include winsock2.h -include ws2tcpip.h" \
+          LIBS="-lws2_32 -lssl -lcrypto -lcrypt32"
 
     - name: Verify binary
       shell: cmd
