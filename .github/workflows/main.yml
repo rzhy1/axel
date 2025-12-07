@@ -22,9 +22,19 @@ jobs:
         git clone https://github.com/microsoft/vcpkg.git $HOME/vcpkg
         $HOME/vcpkg/bootstrap-vcpkg.sh
 
-    - name: Install Windows dependencies via vcpkg
+    - name: Create custom mingw triplet
       run: |
-        $HOME/vcpkg/vcpkg install openssl:x64-windows curl:x64-windows
+        mkdir -p $HOME/vcpkg/triplets/community
+        echo 'set(VCPKG_TARGET_ARCHITECTURE x64)
+set(VCPKG_CMAKE_SYSTEM_NAME Windows)
+set(VCPKG_C_COMPILER x86_64-w64-mingw32-gcc)
+set(VCPKG_CXX_COMPILER x86_64-w64-mingw32-g++)
+set(VCPKG_LIBRARY_LINKAGE static)
+set(VCPKG_BUILD_TYPE release)' > $HOME/vcpkg/triplets/community/x64-windows-mingw.cmake
+
+    - name: Install Windows dependencies via vcpkg (mingw)
+      run: |
+        $HOME/vcpkg/vcpkg install curl:x64-windows-mingw openssl:x64-windows-mingw
         $HOME/vcpkg/vcpkg integrate install
 
     - name: Create build directory
@@ -35,6 +45,7 @@ jobs:
         cd build
         cmake .. \
           -DCMAKE_TOOLCHAIN_FILE=$HOME/vcpkg/scripts/buildsystems/vcpkg.cmake \
+          -DVCPKG_TARGET_TRIPLET=x64-windows-mingw \
           -DCMAKE_SYSTEM_NAME=Windows \
           -DCMAKE_C_COMPILER=x86_64-w64-mingw32-gcc \
           -DCMAKE_CXX_COMPILER=x86_64-w64-mingw32-g++ \
