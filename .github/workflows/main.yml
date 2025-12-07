@@ -6,49 +6,31 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install dependencies for cross-compilation
+      - name: Install vcpkg
         run: |
-          sudo apt update
-          sudo apt install -y git cmake g++-multilib mingw-w64 unzip
+          git clone https://github.com/microsoft/vcpkg.git %USERPROFILE%\vcpkg
+          %USERPROFILE%\vcpkg\bootstrap-vcpkg.bat
 
-      - name: Clone and bootstrap vcpkg
+      - name: Install dependencies via vcpkg
         run: |
-          git clone https://github.com/microsoft/vcpkg.git $HOME/vcpkg
-          $HOME/vcpkg/bootstrap-vcpkg.sh
-
-      - name: Create custom mingw triplet
-        run: |
-          mkdir -p $HOME/vcpkg/triplets/community
-          echo "set(VCPKG_TARGET_ARCHITECTURE x64)" > $HOME/vcpkg/triplets/community/x64-windows-mingw.cmake
-          echo "set(VCPKG_CMAKE_SYSTEM_NAME Windows)" >> $HOME/vcpkg/triplets/community/x64-windows-mingw.cmake
-          echo "set(VCPKG_C_COMPILER x86_64-w64-mingw32-gcc)" >> $HOME/vcpkg/triplets/community/x64-windows-mingw.cmake
-          echo "set(VCPKG_CXX_COMPILER x86_64-w64-mingw32-g++)" >> $HOME/vcpkg/triplets/community/x64-windows-mingw.cmake
-          echo "set(VCPKG_LIBRARY_LINKAGE static)" >> $HOME/vcpkg/triplets/community/x64-windows-mingw.cmake
-          echo "set(VCPKG_BUILD_TYPE release)" >> $HOME/vcpkg/triplets/community/x64-windows-mingw.cmake
-
-      - name: Install Windows dependencies via vcpkg (mingw)
-        run: |
-          $HOME/vcpkg/vcpkg install curl:x64-windows-mingw openssl:x64-windows-mingw
-          $HOME/vcpkg/vcpkg integrate install
+          %USERPROFILE%\vcpkg\vcpkg install curl:x64-windows openssl:x64-windows
+          %USERPROFILE%\vcpkg\vcpkg integrate install
 
       - name: Create build directory
-        run: mkdir -p build
+        run: mkdir build
 
-      - name: Configure CMake (cross compile Windows exe)
+      - name: Configure CMake
         run: |
           cd build
-          cmake .. \
-            -DCMAKE_TOOLCHAIN_FILE=$HOME/vcpkg/scripts/buildsystems/vcpkg.cmake \
-            -DVCPKG_TARGET_TRIPLET=x64-windows-mingw \
-            -DCMAKE_SYSTEM_NAME=Windows \
-            -DCMAKE_C_COMPILER=x86_64-w64-mingw32-gcc \
-            -DCMAKE_CXX_COMPILER=x86_64-w64-mingw32-g++ \
+          cmake .. ^
+            -DCMAKE_TOOLCHAIN_FILE=%USERPROFILE%\vcpkg\scripts\buildsystems\vcpkg.cmake ^
+            -DVCPKG_TARGET_TRIPLET=x64-windows ^
             -DCMAKE_BUILD_TYPE=Release
 
       - name: Build project
@@ -56,7 +38,7 @@ jobs:
           cd build
           cmake --build . --config Release
 
-      - name: Upload Windows exe
+      - name: Upload exe
         uses: actions/upload-artifact@v4
         with:
           name: super_downloader
