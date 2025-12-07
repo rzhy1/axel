@@ -1,14 +1,17 @@
-cmake_minimum_required(VERSION 3.25)
-project(super_downloader)
+cmake_minimum_required(VERSION 3.20)
+project(super_downloader LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 23)
+# 使用 vcpkg toolchain
+if(DEFINED ENV{VCPKG_ROOT})
+    set(CMAKE_TOOLCHAIN_FILE "$ENV{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
+        CACHE STRING "")
+endif()
+
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# 查找库
+# 查找 curl
 find_package(CURL REQUIRED)
-find_package(OpenSSL REQUIRED)
 
 add_executable(super_downloader src/main.cpp)
-
-target_include_directories(super_downloader PRIVATE ${CURL_INCLUDE_DIRS} ${OPENSSL_INCLUDE_DIR})
-target_link_libraries(super_downloader PRIVATE ${CURL_LIBRARIES} OpenSSL::SSL OpenSSL::Crypto)
+target_link_libraries(super_downloader PRIVATE CURL::libcurl)
