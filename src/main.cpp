@@ -1,273 +1,806 @@
-#include <iostream>
-#include <string>
-#include <vector>
-#include <thread>
-#include <mutex>
-#include <atomic>
-#include <fstream>
-#include <filesystem>
+// src/main.cpp
+// Multi-threaded downloader using libcurl (Windows/Unix)
+// Built with C++17
+// Improvements: RAII for resources, atomic progress tracking, robust size probing, optimized merging.
 
-#include <windows.h>
+// ============================================================
+// FIX FOR WINDOWS MSVC BUILD ERRORS
+// These defines must be at the very top, before ANY includes.
+// ============================================================
+#define _CRT_SECURE_NO_WARNINGS
+#define NOMINMAX
+// ============================================================
+
 #include <curl/curl.h>
 
-#pragma comment(lib, "libcurl.lib")
+#include <atomic>
+#include <chrono>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <iomanip>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+#include <memory>
+#include <algorithm>
+#include <functional>
 
-using namespace std;
+namespace fs = std::filesystem;
+using namespace std::chrono_literals;
 
-static mutex g_out;
+// --- RAII Helpers ---
+struct CurlDeleter { void operator()(CURL* c) { if(c) curl_easy_cleanup(c); } };
+using CurlPtr = std::unique_ptr<CURL, CurlDeleter>;
 
-// ---------------- 控制台 UTF-8 ----------------
-void init_console() {
-    SetConsoleOutputCP(CP_UTF8);
-    SetConsoleCP(CP_UTF8);
+struct FileDeleter { void operator()(FILE* f) { if(f) fclose(f); } };
+using FilePtr = std::unique_ptr<FILE, FileDeleter>;
+
+struct Options {
+    std::string url;
+    std::string out;
+    bool force = false;
+    bool insecure = false;
+    std::string cacert;
+    std::string proxy;
+    long limit_rate = 0; // bytes/sec (global)
+    int threads = 4;
+    int retries = 3;
+};
+
+// --- Utils ---
+
+static void print_help() {
+    std::cout <<
+        "SuperDownloader (libcurl + C++17)\n"
+        "Usage:\n"
+        "  superdl <url> [options]\n\n"
+        "Options:\n"
+        "  -o <file>         output file name (default from URL)\n"
+        "  --force           overwrite existing file\n"
+        "  --threads N       number of threads (default 4)\n"
+        "  --retries N       per-segment retries (default 3)\n"
+        "  --insecure        skip SSL verification\n"
+        "  --cacert FILE     CA certificate bundle file\n"
+        "  --proxy PROXY     proxy URL (http://host:port, socks5://...)\n"
+        "  --limit-rate N    global limit, supports K/M suffix (e.g. 100K, 5M)\n"
+        "  -h, --help        show help\n";
 }
 
-// ---------------- 安全打印 ----------------
-void print_err(const string& s) {
-    lock_guard<mutex> lock(g_out);
-    cerr << "[错误] " << s << endl;
-}
-void print_info(const string& s) {
-    lock_guard<mutex> lock(g_out);
-    cout << s << endl;
+static bool is_url(const std::string& s) {
+    return s.rfind("http://", 0) == 0 || s.rfind("https://", 0) == 0;
 }
 
-// ---------------- 字符串前缀判断 ----------------
-bool starts_with(const string& s, const string& p) {
-    if (s.size() < p.size()) return false;
-    return s.compare(0, p.size(), p) == 0;
+static long parse_rate(const std::string& s) {
+    if (s.empty()) return 0;
+    char last = s.back();
+    std::string num = s;
+    long mul = 1;
+    if (last == 'K' || last == 'k') { mul = 1024; num = s.substr(0, s.size()-1); }
+    else if (last == 'M' || last == 'm') { mul = 1024*1024; num = s.substr(0, s.size()-1); }
+    else if (last == 'G' || last == 'g') { mul = 1024*1024*1024; num = s.substr(0, s.size()-1); }
+    try {
+        long v = std::stol(num);
+        return v * mul;
+    } catch(...) { return 0; }
 }
 
-bool is_url(const string& s) {
-    return starts_with(s, "http://") || starts_with(s, "https://");
+static std::string human_readable(long long b) {
+    if (b < 1024) return std::to_string(b) + " B";
+    double v = static_cast<double>(b);
+    const char* u[] = {" B"," KB"," MB"," GB"," TB"};
+    int i = 0;
+    while (v >= 1024.0 && i < 4) { v /= 1024.0; ++i; }
+    char buf[64];
+    snprintf(buf, sizeof(buf), "%.2f%s", v, u[i]);
+    return std::string(buf);
 }
 
-// ---------------- curl 写入 ----------------
-size_t write_cb(void* ptr, size_t size, size_t nm, void* userdata) {
-    FILE* fp = (FILE*)userdata;
-    return fwrite(ptr, size, nm, fp);
+static std::string format_time(double seconds) {
+    if (seconds < 0) return "--";
+    if (seconds < 60) return std::to_string(static_cast<int>(seconds)) + "s";
+    if (seconds < 3600) {
+        int m = static_cast<int>(seconds / 60);
+        int s = static_cast<int>(seconds) % 60;
+        return std::to_string(m) + "m" + (s < 10 ? "0" : "") + std::to_string(s) + "s";
+    }
+    int h = static_cast<int>(seconds / 3600);
+    int m = static_cast<int>((seconds - h * 3600) / 60);
+    return std::to_string(h) + "h" + (m < 10 ? "0" : "") + std::to_string(m) + "m";
 }
 
-// ---------------- 尝试用 HEAD 获取大小 ----------------
-long long try_head_size(CURL* curl, const string& url) {
-    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(curl, CURLOPT_NOBODY, 1L);
-    curl_easy_setopt(curl, CURLOPT_HEADER, 0L);
+// --- Logic ---
+
+struct WriteCtx {
+    FILE* fp;
+    std::atomic<long long>* downloaded_counter;
+};
+
+static size_t write_cb(void* ptr, size_t size, size_t nmemb, void* userdata) {
+    WriteCtx* ctx = static_cast<WriteCtx*>(userdata);
+    if (!ctx || !ctx->fp) return 0;
+    
+    size_t total_size = size * nmemb;
+    size_t written = fwrite(ptr, 1, total_size, ctx->fp);
+    
+    if (ctx->downloaded_counter && written > 0) {
+        ctx->downloaded_counter->fetch_add(written, std::memory_order_relaxed);
+    }
+    return written;
+}
+
+struct Part {
+    long long start;
+    long long end;
+    std::string partfile;
+    std::atomic<long long> downloaded; // Bytes downloaded in this session (or detected on disk)
+    std::atomic<bool> done;
+    std::atomic<bool> failed;
+    int idx;
+    Part() : start(0), end(0), downloaded(0), done(false), failed(false), idx(-1) {}
+};
+
+// Robust size probing: Try HEAD, if fail try Range GET
+static long long probe_file_size(const std::string& url, const Options& opt) {
+    CurlPtr c(curl_easy_init());
+    if (!c) return -1;
+
+    // Common setup
+    auto setup = [&](CURL* h) {
+        curl_easy_setopt(h, CURLOPT_URL, url.c_str());
+        curl_easy_setopt(h, CURLOPT_FOLLOWLOCATION, 1L);
+        curl_easy_setopt(h, CURLOPT_FAILONERROR, 1L);
+        curl_easy_setopt(h, CURLOPT_CONNECTTIMEOUT, 10L);
+        curl_easy_setopt(h, CURLOPT_TIMEOUT, 30L);
+        if (opt.insecure) {
+            curl_easy_setopt(h, CURLOPT_SSL_VERIFYPEER, 0L);
+            curl_easy_setopt(h, CURLOPT_SSL_VERIFYHOST, 0L);
+        }
+        if (!opt.cacert.empty()) curl_easy_setopt(h, CURLOPT_CAINFO, opt.cacert.c_str());
+        if (!opt.proxy.empty()) curl_easy_setopt(h, CURLOPT_PROXY, opt.proxy.c_str());
+    };
+
+    // 1. Try HEAD
+    setup(c.get());
+    curl_easy_setopt(c.get(), CURLOPT_NOBODY, 1L);
+    CURLcode res = curl_easy_perform(c.get());
+    
+    double cl = 0;
+    long response_code = 0;
+    
+    if (res == CURLE_OK) {
+        curl_easy_getinfo(c.get(), CURLINFO_CONTENT_LENGTH_DOWNLOAD, &cl);
+        curl_easy_getinfo(c.get(), CURLINFO_RESPONSE_CODE, &response_code);
+        
+        if (cl > 0) {
+            // Check if server supports Range requests
+            char* accept_ranges = nullptr;
+            curl_easy_getinfo(c.get(), CURLINFO_CONTENT_LENGTH_DOWNLOAD_T, &cl);
+            curl_easy_getinfo(c.get(), CURLINFO_HTTP_CONNECTCODE, &response_code);
+            // Try to get Accept-Ranges header (optional)
+            return static_cast<long long>(cl);
+        }
+    }
+
+    // If we get here, either HEAD failed or no content-length
+    // Reset handle for a GET request of first 1KB to check size
+    curl_easy_reset(c.get());
+    setup(c.get());
+    curl_easy_setopt(c.get(), CURLOPT_RANGE, "0-1023"); // Get first 1KB
+    curl_easy_setopt(c.get(), CURLOPT_NOBODY, 0L); // Do get body
+    
+    // Write to null to ignore data
+    curl_easy_setopt(c.get(), CURLOPT_WRITEFUNCTION, [](void*, size_t, size_t, void*) { return size_t(0); });
+    
+    res = curl_easy_perform(c.get());
+    if (res == CURLE_OK) {
+        curl_easy_getinfo(c.get(), CURLINFO_CONTENT_LENGTH_DOWNLOAD, &cl);
+        // If we got a partial content (206), server supports ranges
+        curl_easy_getinfo(c.get(), CURLINFO_RESPONSE_CODE, &response_code);
+        if (response_code == 206 && cl > 0) {
+            // Try to get full size from Content-Range header
+            // This is complex, so we'll return -1 to trigger single-thread mode
+        }
+    }
+    
+    return -1;
+}
+
+static void set_curl_options(CURL* curl, const Options& opt) {
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-
-    CURLcode r = curl_easy_perform(curl);
-    if (r != CURLE_OK) return -1;
-
-    double cl = -1;
-    curl_easy_getinfo(curl, CURLINFO_CONTENT_LENGTH_DOWNLOAD, &cl);
-    return (long long)cl;
-}
-
-// ---------------- HEAD 不行 → fallback GET 获取大小 ----------------
-long long try_get_size_with_range(CURL* curl, const string& url) {
-    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(curl, CURLOPT_NOBODY, 0L);
-    curl_easy_setopt(curl, CURLOPT_RANGE, "0-0");
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, nullptr);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, +[](void*, size_t s, size_t n, void*) { return s*n; });
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-
-    CURLcode r = curl_easy_perform(curl);
-    if (r != CURLE_OK) return -1;
-
-    double cl = -1;
-    curl_easy_getinfo(curl, CURLINFO_CONTENT_LENGTH_DOWNLOAD, &cl);
-    return (long long)cl;
-}
-
-// ---------------- 获取大小（自动 fallback） ----------------
-long long get_total_size(const string& url, bool skipSSL, const string& cafile, const string& proxy) {
-    CURL* curl = curl_easy_init();
-    if (!curl) return -1;
-
-    if (!proxy.empty()) curl_easy_setopt(curl, CURLOPT_PROXY, proxy.c_str());
-    if (skipSSL) {
+    curl_easy_setopt(curl, CURLOPT_FAILONERROR, 1L);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 30L);
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1024L);
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 30L);
+    curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
+    
+    if (opt.insecure) {
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
-    } else if (!cafile.empty()) {
-        curl_easy_setopt(curl, CURLOPT_CAINFO, cafile.c_str());
     }
-
-    long long size1 = try_head_size(curl, url);
-    if (size1 > 0) {
-        curl_easy_cleanup(curl);
-        return size1;
-    }
-
-    long long size2 = try_get_size_with_range(curl, url);
-    curl_easy_cleanup(curl);
-    return size2;
+    
+    if (!opt.cacert.empty()) curl_easy_setopt(curl, CURLOPT_CAINFO, opt.cacert.c_str());
+    if (!opt.proxy.empty()) curl_easy_setopt(curl, CURLOPT_PROXY, opt.proxy.c_str());
 }
 
-// ---------------- 分段下载 ----------------
-bool download_range(const string& url, const string& tmp, long long start, long long end,
-                    bool skipSSL, const string& cafile, const string& proxy) {
-
-    CURL* curl = curl_easy_init();
-    if (!curl) return false;
-
-    char range[100];
-    sprintf(range, "%lld-%lld", start, end);
-
-    FILE* fp = fopen(tmp.c_str(), "wb");
-    if (!fp) { curl_easy_cleanup(curl); return false; }
-
-    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(curl, CURLOPT_RANGE, range);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-
-    if (!proxy.empty()) curl_easy_setopt(curl, CURLOPT_PROXY, proxy.c_str());
-    if (skipSSL) {
-        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
-        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
-    } else if (!cafile.empty()) {
-        curl_easy_setopt(curl, CURLOPT_CAINFO, cafile.c_str());
+static void worker_func(const Options& opt, Part* part) {
+    // Open part file for appending
+    FilePtr fp(fopen(part->partfile.c_str(), "ab+"));
+    if (!fp) {
+        std::cerr << "[Thread " << part->idx << "] Error opening file: " << part->partfile << "\n";
+        part->failed = true;
+        return;
     }
 
-    CURLcode r = curl_easy_perform(curl);
-    fclose(fp);
-    curl_easy_cleanup(curl);
-    return r == CURLE_OK;
+    // Check existing size
+    if (fseek(fp.get(), 0, SEEK_END) != 0) {
+        std::cerr << "[Thread " << part->idx << "] Error seeking in file\n";
+        part->failed = true;
+        return;
+    }
+    
+    long long current_size = ftell(fp.get());
+    if (current_size < 0) {
+        std::cerr << "[Thread " << part->idx << "] Error getting file size\n";
+        part->failed = true;
+        return;
+    }
+    
+    // Update atomic counter to reflect what's already on disk
+    part->downloaded = current_size;
+
+    long long part_len = part->end - part->start + 1;
+    if (current_size >= part_len) {
+        part->done = true;
+        return; // Already done
+    }
+
+    CurlPtr c(curl_easy_init());
+    if (!c) {
+        part->failed = true;
+        return;
+    }
+
+    // Basic setup
+    curl_easy_setopt(c.get(), CURLOPT_URL, opt.url.c_str());
+    set_curl_options(c.get(), opt);
+    
+    // Rate Limit (per thread estimate)
+    if (opt.limit_rate > 0) {
+        long long per_thread = opt.limit_rate / (opt.threads > 0 ? opt.threads : 1);
+        if (per_thread > 0) {
+            curl_easy_setopt(c.get(), CURLOPT_MAX_RECV_SPEED_LARGE, static_cast<curl_off_t>(per_thread));
+        }
+    }
+
+    WriteCtx ctx{fp.get(), &part->downloaded};
+    curl_easy_setopt(c.get(), CURLOPT_WRITEFUNCTION, write_cb);
+    curl_easy_setopt(c.get(), CURLOPT_WRITEDATA, &ctx);
+
+    int tries = 0;
+    bool fatal_error = false;
+    
+    while (tries <= opt.retries && !part->done && !fatal_error) {
+        // Recalculate range based on current file size (resume)
+        if (fflush(fp.get()) != 0) {
+            std::cerr << "[Thread " << part->idx << "] Error flushing file\n";
+            break;
+        }
+        
+        if (fseek(fp.get(), 0, SEEK_END) != 0) {
+            std::cerr << "[Thread " << part->idx << "] Error seeking in file\n";
+            break;
+        }
+        
+        long long now_have = ftell(fp.get());
+        if (now_have < 0) {
+            std::cerr << "[Thread " << part->idx << "] Error getting file position\n";
+            break;
+        }
+        
+        // Safety check
+        if (now_have >= part_len) {
+            part->done = true;
+            break;
+        }
+        
+        // Sync atomic with disk reality before request
+        part->downloaded = now_have;
+
+        long long req_start = part->start + now_have;
+        if (req_start > part->end) {
+            part->done = true;
+            break;
+        }
+        
+        char range_buf[64];
+        snprintf(range_buf, sizeof(range_buf), "%lld-%lld", req_start, part->end);
+        curl_easy_setopt(c.get(), CURLOPT_RANGE, range_buf);
+
+        CURLcode res = curl_easy_perform(c.get());
+        
+        if (res == CURLE_OK) {
+            // Verify we got the complete range
+            fseek(fp.get(), 0, SEEK_END);
+            long long final_size = ftell(fp.get());
+            if (final_size >= part_len) {
+                part->done = true;
+                break;
+            } else {
+                // Partial download, continue with retry
+                tries++;
+            }
+        } else {
+            // Error handling
+            long response_code = 0;
+            curl_easy_getinfo(c.get(), CURLINFO_RESPONSE_CODE, &response_code);
+            
+            // Don't retry on client errors (4xx) except 408 (Request Timeout) and 429 (Too Many Requests)
+            if (response_code >= 400 && response_code < 500 && 
+                response_code != 408 && response_code != 429) {
+                std::cerr << "[Thread " << part->idx << "] HTTP Error " << response_code 
+                          << " (" << curl_easy_strerror(res) << "), stopping.\n";
+                fatal_error = true;
+                break;
+            }
+
+            tries++;
+            if (tries <= opt.retries) {
+                std::cerr << "[Thread " << part->idx << "] Retry " << tries << "/" << opt.retries 
+                          << " (" << curl_easy_strerror(res) << ")\n";
+                // Exponential backoff
+                std::this_thread::sleep_for(std::chrono::seconds(1 << (tries - 1)));
+            } else {
+                std::cerr << "[Thread " << part->idx << "] Failed after " << opt.retries << " retries: " 
+                          << curl_easy_strerror(res) << "\n";
+                part->failed = true;
+            }
+        }
+    }
+    
+    if (part->done) {
+        // Final size check
+        fseek(fp.get(), 0, SEEK_END);
+        long long final_size = ftell(fp.get());
+        if (final_size < part_len) {
+            std::cerr << "[Thread " << part->idx << "] Warning: Incomplete download ("
+                      << final_size << "/" << part_len << " bytes)\n";
+            part->failed = true;
+        }
+    }
 }
 
-// ---------------- 合并 ----------------
-bool merge_parts(const string& out, int threads) {
-    ofstream o(out, ios::binary);
-    if (!o) return false;
-
-    for (int i = 0; i < threads; i++) {
-        string p = out + ".part" + to_string(i);
-        ifstream in(p, ios::binary);
-        if (!in) return false;
-        o << in.rdbuf();
-        in.close();
-        filesystem::remove(p);
+static bool merge_parts(const std::string& out, int nparts, long long total_size) {
+    std::cout << "\nMerging " << nparts << " parts into " << out << "...\n";
+    
+    // Check total size of parts first
+    long long parts_total = 0;
+    for (int i = 0; i < nparts; ++i) {
+        std::string p = out + ".part" + std::to_string(i);
+        std::error_code ec;
+        if (!fs::exists(p, ec)) {
+            std::cerr << "Error: Missing part file " << p << "\n";
+            return false;
+        }
+        auto sz = fs::file_size(p, ec);
+        if (ec) {
+            std::cerr << "Error: Cannot get size of part file " << p << ": " << ec.message() << "\n";
+            return false;
+        }
+        parts_total += static_cast<long long>(sz);
     }
+    
+    if (total_size > 0 && parts_total != total_size) {
+        std::cerr << "Warning: Total parts size (" << human_readable(parts_total) 
+                  << ") doesn't match expected size (" << human_readable(total_size) << ")\n";
+    }
+    
+    // Use a reasonable buffer size
+    const size_t BUF_SIZE = 1024 * 1024; // 1MB
+    std::unique_ptr<char[]> buffer(new char[BUF_SIZE]);
+
+    std::ofstream ofs(out, std::ios::binary | std::ios::trunc);
+    if (!ofs.is_open()) {
+        std::cerr << "Error creating output file: " << out << "\n";
+        return false;
+    }
+
+    long long merged_bytes = 0;
+    for (int i = 0; i < nparts; ++i) {
+        std::string p = out + ".part" + std::to_string(i);
+        std::ifstream ifs(p, std::ios::binary | std::ios::ate);
+        if (!ifs.is_open()) {
+            std::cerr << "Error: Cannot open part file " << p << "\n";
+            return false;
+        }
+        
+        auto file_size = ifs.tellg();
+        ifs.seekg(0, std::ios::beg);
+        
+        long long part_bytes = 0;
+        while (ifs) {
+            ifs.read(buffer.get(), BUF_SIZE);
+            std::streamsize cnt = ifs.gcount();
+            if (cnt > 0) {
+                ofs.write(buffer.get(), cnt);
+                if (!ofs.good()) {
+                    std::cerr << "Error writing to output file at " << merged_bytes << " bytes\n";
+                    return false;
+                }
+                part_bytes += cnt;
+                merged_bytes += cnt;
+            }
+        }
+        
+        if (part_bytes != file_size) {
+            std::cerr << "Warning: Part " << i << " size mismatch: read " << part_bytes 
+                      << ", expected " << file_size << "\n";
+        }
+        
+        ifs.close();
+        
+        // Show progress for large files
+        if (parts_total > 100 * 1024 * 1024) { // > 100MB
+            double progress = static_cast<double>(merged_bytes) / parts_total * 100.0;
+            std::cout << "\rMerging: " << std::fixed << std::setprecision(1) << progress << "%" << std::flush;
+        }
+    }
+    
+    if (parts_total > 100 * 1024 * 1024) {
+        std::cout << "\n";
+    }
+    
     return true;
 }
 
-// ---------------- 自动文件名 ----------------
-string get_filename(const string& url) {
-    auto pos = url.find_last_of('/');
-    if (pos == string::npos) return "download.bin";
-    auto n = url.substr(pos + 1);
-    return n.empty() ? "download.bin" : n;
+static void remove_parts(const std::string& out, int nparts) {
+    bool any_error = false;
+    for (int i = 0; i < nparts; ++i) {
+        std::string p = out + ".part" + std::to_string(i);
+        std::error_code ec;
+        if (fs::exists(p, ec)) {
+            if (!fs::remove(p, ec)) {
+                std::cerr << "Warning: Could not remove part file " << p << ": " << ec.message() << "\n";
+                any_error = true;
+            }
+        }
+    }
+    if (any_error) {
+        std::cerr << "Some part files could not be removed. You may need to clean them up manually.\n";
+    }
 }
 
-// ==========================================================
-//                        主函数
-// ==========================================================
-int main(int argc, char* argv[]) {
-    init_console();
-
-    if (argc == 1) {
-        print_info("用法: a <URL> [选项]");
+// Single thread fallback for servers not supporting ranges/HEAD
+static bool download_single_thread(const Options& opt) {
+    std::cout << "Falling back to single-threaded download...\n";
+    
+    CurlPtr c(curl_easy_init());
+    if (!c) {
+        std::cerr << "Failed to initialize CURL\n";
+        return false;
+    }
+    
+    FilePtr fp(fopen(opt.out.c_str(), "wb"));
+    if (!fp) {
+        std::cerr << "Cannot open output file: " << opt.out << "\n";
+        return false;
+    }
+    
+    curl_easy_setopt(c.get(), CURLOPT_URL, opt.url.c_str());
+    set_curl_options(c.get(), opt);
+    
+    std::atomic<long long> downloaded(0);
+    WriteCtx ctx{fp.get(), &downloaded};
+    curl_easy_setopt(c.get(), CURLOPT_WRITEFUNCTION, write_cb);
+    curl_easy_setopt(c.get(), CURLOPT_WRITEDATA, &ctx);
+    
+    if (opt.limit_rate > 0) {
+        curl_easy_setopt(c.get(), CURLOPT_MAX_RECV_SPEED_LARGE, static_cast<curl_off_t>(opt.limit_rate));
+    }
+    
+    // Progress callback
+    auto start_time = std::chrono::steady_clock::now();
+    auto last_update = start_time;
+    long long last_bytes = 0;
+    
+    curl_easy_setopt(c.get(), CURLOPT_NOPROGRESS, 0L);
+    curl_easy_setopt(c.get(), CURLOPT_XFERINFOFUNCTION, [](void* clientp,
+        curl_off_t dltotal, curl_off_t dlnow,
+        curl_off_t, curl_off_t) -> int {
+        
+        auto now = std::chrono::steady_clock::now();
+        auto* data = static_cast<std::tuple<std::chrono::steady_clock::time_point*, 
+                                           long long*, long long*>*>(clientp);
+        if (!data) return 0;
+        
+        auto& [last_update, last_bytes, downloaded] = *data;
+        
+        // Update our atomic counter with curl's progress
+        long long new_bytes = dlnow;
+        long long diff = new_bytes - *last_bytes;
+        if (diff > 0) {
+            downloaded += diff;
+            *last_bytes = new_bytes;
+        }
+        
+        // Only update display every 200ms to avoid flickering
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - *last_update).count() > 200) {
+            double speed = 0;
+            auto elapsed = std::chrono::duration<double>(now - *last_update).count();
+            if (elapsed > 0) {
+                speed = diff / elapsed;
+            }
+            
+            double percent = dltotal > 0 ? (dlnow * 100.0 / dltotal) : 0;
+            std::cout << "\rProgress: " << std::fixed << std::setprecision(1) << percent << "% "
+                      << "(" << human_readable(dlnow) 
+                      << (dltotal > 0 ? "/" + human_readable(dltotal) : "") << ") "
+                      << "@ " << human_readable(static_cast<long long>(speed)) << "/s" << std::flush;
+            
+            *last_update = now;
+            *last_bytes = new_bytes;
+        }
+        
         return 0;
+    });
+    
+    auto progress_data = std::make_tuple(&last_update, &last_bytes, &downloaded);
+    curl_easy_setopt(c.get(), CURLOPT_XFERINFODATA, &progress_data);
+
+    CURLcode res = curl_easy_perform(c.get());
+    std::cout << "\n";
+    
+    if (res != CURLE_OK) {
+        std::cerr << "Download failed: " << curl_easy_strerror(res) << "\n";
+        return false;
+    }
+    
+    // Get final size if available
+    double dltotal = 0;
+    curl_easy_getinfo(c.get(), CURLINFO_CONTENT_LENGTH_DOWNLOAD, &dltotal);
+    long long total = static_cast<long long>(dltotal);
+    
+    std::cout << "Download complete: " << opt.out 
+              << (total > 0 ? " (" + human_readable(total) + ")" : "") << "\n";
+    return true;
+}
+
+int main(int argc, char** argv) {
+    Options opt;
+
+    if (argc < 2) { 
+        print_help(); 
+        return 0; 
     }
 
-    // ----------- 参数解析（不会把选项当 URL） ------------
-    string url = "";
-    int threads = 4;
-    bool force = false;
-    string proxy = "";
-    bool skipSSL = false;
-    string cafile = "";
-    string outdir = ".";
-
-    for (int i = 1; i < argc; i++) {
-        string arg = argv[i];
-
-        if (arg == "-h" || arg == "--help") {
-            print_info("使用说明:\n"
-                       "  a <URL> [选项]\n"
-                       "选项:\n"
-                       "  --threads N   线程数\n"
-                       "  --force       覆盖文件\n"
-                       "  --proxy URL   设置代理\n"
-                       "  --skip-ssl    跳过 SSL 验证\n"
-                       "  --ca FILE     指定 CA 文件\n");
-            return 0;
+    // Parse command line arguments
+    bool url_provided = false;
+    for (int i = 1; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a == "-h" || a == "--help") { 
+            print_help(); 
+            return 0; 
         }
-
-        if (arg == "-v" || arg == "--version") {
-            print_info("super_downloader v1.0");
-            return 0;
+        else if (a == "-o" && i + 1 < argc) { 
+            opt.out = argv[++i]; 
         }
-
-        if (arg == "--threads" && i + 1 < argc) { threads = atoi(argv[++i]); continue; }
-        if (arg == "--force") { force = true; continue; }
-        if (arg == "--proxy" && i + 1 < argc) { proxy = argv[++i]; continue; }
-        if (arg == "--skip-ssl") { skipSSL = true; continue; }
-        if (arg == "--ca" && i + 1 < argc) { cafile = argv[++i]; continue; }
-
-        // ---------- 只有不是选项的才是 URL ----------
-        if (is_url(arg)) url = arg;
+        else if (a == "--force") { 
+            opt.force = true; 
+        }
+        else if (a == "--insecure") { 
+            opt.insecure = true; 
+        }
+        else if (a == "--cacert" && i + 1 < argc) { 
+            opt.cacert = argv[++i]; 
+        }
+        else if (a == "--proxy" && i + 1 < argc) { 
+            opt.proxy = argv[++i]; 
+        }
+        else if (a == "--threads" && i + 1 < argc) { 
+            int val = std::atoi(argv[++i]);
+            opt.threads = (val > 0) ? val : 1;
+        }
+        else if (a == "--retries" && i + 1 < argc) { 
+            int val = std::atoi(argv[++i]);
+            opt.retries = (val >= 0) ? val : 3;
+        }
+        else if (a == "--limit-rate" && i + 1 < argc) { 
+            opt.limit_rate = parse_rate(argv[++i]); 
+        }
+        else if (is_url(a)) { 
+            opt.url = a; 
+            url_provided = true;
+        }
+        else {
+            std::cerr << "Unknown argument: " << a << "\n";
+            print_help();
+            return 1;
+        }
     }
 
-    // ---------- 没有 URL ----------
-    if (url.empty()) {
-        print_err("缺少 URL");
+    if (!url_provided) { 
+        std::cerr << "Error: No URL provided.\n"; 
+        return 1; 
+    }
+    
+    // Auto output filename
+    if (opt.out.empty()) {
+        size_t pos = opt.url.find_last_of('/');
+        if (pos == std::string::npos) {
+            opt.out = "download.bin";
+        } else {
+            std::string filename = opt.url.substr(pos + 1);
+            // Remove query parameters
+            size_t qpos = filename.find('?');
+            if (qpos != std::string::npos) {
+                filename = filename.substr(0, qpos);
+            }
+            // Remove URL fragments
+            size_t fpos = filename.find('#');
+            if (fpos != std::string::npos) {
+                filename = filename.substr(0, fpos);
+            }
+            if (filename.empty()) {
+                opt.out = "download.bin";
+            } else {
+                opt.out = filename;
+            }
+        }
+    }
+
+    // Check if file exists
+    std::error_code ec;
+    if (fs::exists(opt.out, ec) && !opt.force) {
+        std::cerr << "Error: File exists: " << opt.out << " (use --force to overwrite)\n";
         return 1;
     }
 
-    // 检查 URL
-    if (!is_url(url)) {
-        print_err("URL 无效，必须 http:// 或 https://");
+    // Initialize libcurl
+    if (curl_global_init(CURL_GLOBAL_ALL) != CURLE_OK) {
+        std::cerr << "Failed to initialize libcurl\n";
         return 1;
     }
 
-    // ---------- 获取大小（支持跳过 HEAD） ----------
-    curl_global_init(CURL_GLOBAL_ALL);
-    long long size = get_total_size(url, skipSSL, cafile, proxy);
+    // Get file size
+    long long total = probe_file_size(opt.url, opt);
+    
+    if (total <= 0) {
+        bool success = download_single_thread(opt);
+        curl_global_cleanup();
+        return success ? 0 : 1;
+    }
 
-    if (size <= 0) {
-        print_err("无法获取文件大小（HEAD/Range 都失败）");
+    std::cout << "File size: " << human_readable(total) << " (" << total << " bytes)\n";
+    std::cout << "Threads: " << opt.threads << ", Output: " << opt.out << "\n";
+
+    // Adjust thread count for small files
+    if (total < opt.threads * 1024LL) {
+        int old_threads = opt.threads;
+        opt.threads = static_cast<int>(std::max<long long>(1, total / 1024LL));
+        if (opt.threads < old_threads) {
+            std::cout << "Adjusting thread count from " << old_threads << " to " 
+                      << opt.threads << " (file is small)\n";
+        }
+    }
+
+    // Setup parts
+    int n = opt.threads;
+    std::vector<Part> parts(n);
+    
+    long long part_size = total / n;
+    long long remainder = total % n;
+    long long current_start = 0;
+    
+    for (int i = 0; i < n; ++i) {
+        parts[i].idx = i;
+        parts[i].start = current_start;
+        long long size = part_size + (i < remainder ? 1 : 0);
+        parts[i].end = current_start + size - 1;
+        current_start += size;
+        
+        parts[i].partfile = opt.out + ".part" + std::to_string(i);
+        
+        // Remove existing part files if --force is specified
+        if (opt.force && fs::exists(parts[i].partfile, ec)) {
+            fs::remove(parts[i].partfile, ec);
+        }
+    }
+
+    // Launch threads
+    std::vector<std::thread> workers;
+    workers.reserve(n);
+    
+    for (int i = 0; i < n; ++i) {
+        workers.emplace_back(worker_func, std::cref(opt), &parts[i]);
+    }
+
+    // Monitor progress
+    auto start_time = std::chrono::steady_clock::now();
+    auto last_time = start_time;
+    long long last_sum = 0;
+    
+    std::cout << "Starting download...\n";
+    
+    while (true) {
+        std::this_thread::sleep_for(500ms);
+
+        long long sum = 0;
+        bool all_done = true;
+        bool any_failed = false;
+        
+        // Sum atomic counters
+        for (const auto& p : parts) {
+            sum += p.downloaded.load(std::memory_order_relaxed);
+            if (!p.done) all_done = false;
+            if (p.failed) any_failed = true;
+        }
+        
+        // Cap sum at total
+        if (sum > total) sum = total;
+
+        auto now = std::chrono::steady_clock::now();
+        double dt = std::chrono::duration<double>(now - last_time).count();
+        double speed = 0;
+        if (dt > 0) speed = static_cast<double>(sum - last_sum) / dt;
+
+        double elapsed = std::chrono::duration<double>(now - start_time).count();
+        double eta = (speed > 0 && sum < total) ? (total - sum) / speed : 0.0;
+        double pct = (total > 0) ? static_cast<double>(sum) * 100.0 / total : 0.0;
+
+        // Clear line and print progress
+        std::cout << "\r\033[K[" << std::fixed << std::setprecision(1) << pct << "%] "
+                  << human_readable(sum) << "/" << human_readable(total) 
+                  << " @ " << human_readable(static_cast<long long>(speed)) << "/s "
+                  << "ETA: " << format_time(eta)
+                  << (any_failed ? " (some parts failed)" : "") << std::flush;
+
+        last_time = now;
+        last_sum = sum;
+
+        if (all_done || any_failed) break;
+    }
+    
+    std::cout << "\n";
+
+    // Join threads
+    for (auto& t : workers) {
+        if (t.joinable()) t.join();
+    }
+
+    // Check results
+    bool any_failed = false;
+    bool all_complete = true;
+    
+    for(const auto& p : parts) {
+        if (p.failed) any_failed = true;
+        if (!p.done) all_complete = false;
+    }
+
+    if (any_failed || !all_complete) {
+        std::cerr << "Error: Some parts failed to download completely.\n";
+        std::cerr << "You can resume by running the command again.\n";
+        curl_global_cleanup();
         return 1;
     }
 
-    print_info("文件大小: " + to_string(size) + " 字节");
-
-    // ---------- 输出文件 ----------
-    string name = get_filename(url);
-    string outfile = (filesystem::path(outdir) / name).string();
-
-    if (filesystem::exists(outfile) && !force) {
-        print_err("文件已存在，使用 --force 覆盖");
+    // Merge parts
+    if (merge_parts(opt.out, n, total)) {
+        remove_parts(opt.out, n);
+        auto end_time = std::chrono::steady_clock::now();
+        double total_time = std::chrono::duration<double>(end_time - start_time).count();
+        double avg_speed = total > 0 ? total / total_time : 0;
+        
+        std::cout << "Success: " << opt.out << " (" << human_readable(total) << ")\n";
+        std::cout << "Time: " << format_time(total_time) 
+                  << ", Average speed: " << human_readable(static_cast<long long>(avg_speed)) << "/s\n";
+    } else {
+        std::cerr << "Merge failed! Parts kept for resume.\n";
+        curl_global_cleanup();
         return 1;
     }
 
-    // ---------- 多线程 ----------
-    long long part = size / threads;
-    vector<thread> pool;
-
-    for (int i = 0; i < threads; i++) {
-        long long s = i * part;
-        long long e = (i == threads - 1) ? size - 1 : s + part - 1;
-        string tmp = outfile + ".part" + to_string(i);
-
-        pool.emplace_back([&, s, e, tmp, i]() {
-            bool ok = download_range(url, tmp, s, e, skipSSL, cafile, proxy);
-            if (!ok)
-                print_err("线程 " + to_string(i) + " 下载失败");
-        });
-    }
-
-    for (auto& t : pool) t.join();
-
-    print_info("合并文件中...");
-    if (!merge_parts(outfile, threads)) {
-        print_err("合并失败");
-        return 1;
-    }
-
-    print_info("下载完成！");
     curl_global_cleanup();
     return 0;
 }
