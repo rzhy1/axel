@@ -1,4 +1,4 @@
-name: Build Super Downloader
+name: Build Super Downloader (Windows EXE)
 
 on:
   push:
@@ -9,21 +9,32 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout source
+    - name: Checkout repository
       uses: actions/checkout@v4
 
-    - name: Install dependencies
+    - name: Install dependencies for cross-compilation
       run: |
         sudo apt update
-        sudo apt install -y mingw-w64 cmake g++-multilib libcurl4-openssl-dev libssl-dev
+        sudo apt install -y git cmake g++-multilib mingw-w64 unzip
+
+    - name: Clone and bootstrap vcpkg
+      run: |
+        git clone https://github.com/microsoft/vcpkg.git $HOME/vcpkg
+        $HOME/vcpkg/bootstrap-vcpkg.sh
+
+    - name: Install Windows dependencies via vcpkg
+      run: |
+        $HOME/vcpkg/vcpkg install openssl:x64-windows curl:x64-windows
+        $HOME/vcpkg/vcpkg integrate install
 
     - name: Create build directory
       run: mkdir -p build
 
-    - name: Configure CMake for cross-compilation
+    - name: Configure CMake (cross compile Windows exe)
       run: |
         cd build
         cmake .. \
+          -DCMAKE_TOOLCHAIN_FILE=$HOME/vcpkg/scripts/buildsystems/vcpkg.cmake \
           -DCMAKE_SYSTEM_NAME=Windows \
           -DCMAKE_C_COMPILER=x86_64-w64-mingw32-gcc \
           -DCMAKE_CXX_COMPILER=x86_64-w64-mingw32-g++ \
