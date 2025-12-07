@@ -4,7 +4,7 @@ project(super_downloader)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# 查找依赖库
+# 查找库
 find_package(CURL REQUIRED)
 find_package(OpenSSL REQUIRED)
 
