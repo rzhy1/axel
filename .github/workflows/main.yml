@@ -28,10 +28,10 @@ jobs:
     # Install vcpkg if not exists
     - name: Setup vcpkg
       run: |
-        if not exist C:\vcpkg (
+        if (-Not (Test-Path "C:\vcpkg")) {
           git clone https://github.com/microsoft/vcpkg.git C:\vcpkg
-          C:\vcpkg\bootstrap-vcpkg.bat
-        )
+          & C:\vcpkg\bootstrap-vcpkg.bat
+        }
 
     # Install dependencies via vcpkg (curl + OpenSSL + zlib)
     - name: Install dependencies
