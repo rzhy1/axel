@@ -1,58 +1,36 @@
-name: Build Super Downloader
+name: Build Downloader
 
 on:
   push:
-  pull_request:
+  workflow_dispatch:
 
 jobs:
   build:
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        include:
-          - os: ubuntu-latest
-            cc: gcc
-          - os: macos-latest
-            cc: clang
-          - os: windows-latest
-            cc: msvc
-
-    runs-on: ${{ matrix.os }}
+    runs-on: windows-latest
 
     steps:
-    - uses: actions/checkout@v4
+    - name: Checkout
+      uses: actions/checkout@v4
 
-    - name: Setup dependencies (Ubuntu)
-      if: matrix.os == 'ubuntu-latest'
+    - name: Install vcpkg (Official Way)
       run: |
-        sudo apt-get update
-        sudo apt-get install -y build-essential cmake libcurl4-openssl-dev libssl-dev
+        git clone https://github.com/microsoft/vcpkg.git C:/vcpkg
+        C:/vcpkg/bootstrap-vcpkg.bat
 
-    - name: Setup dependencies (macOS)
-      if: matrix.os == 'macos-latest'
+    - name: Install dependencies via vcpkg
       run: |
-        brew update
-        brew install cmake curl openssl
-        export PATH="/usr/local/opt/curl/bin:$PATH"
+        C:/vcpkg/vcpkg install curl:x64-windows openssl:x64-windows
+        C:/vcpkg/vcpkg integrate install
 
-    - name: Setup dependencies (Windows)
-      if: matrix.os == 'windows-latest'
+    - name: Configure CMake
       run: |
-        choco install -y vcpkg
-        set VCPKG_ROOT=%ProgramData%\chocolatey\lib\vcpkg\tools\vcpkg
-        echo "vcpkg root: %VCPKG_ROOT%"
-        %VCPKG_ROOT%\vcpkg install curl[ssl]:x64-windows openssl:x64-windows
-      shell: cmd
+        cmake -B build -S . -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake -A x64
 
-    - name: Configure & Build
-      run: |
-        mkdir -p build
-        cd build
-        if [ "${{ matrix.os }}" = "windows-latest" ]; then
-          cmake -G "Visual Studio 17 2022" -A x64 ..
-          cmake --build . --config Release
-        else
-          cmake ..
-          cmake --build . --config Release -j$(nproc)
-        fi
-      shell: bash
+    - name: Build
+      run: cmake --build build --config Release
+
+    - name: Upload EXE
+      uses: actions/upload-artifact@v4
+      with:
+        name: downloader
+        path: build/Release/*.exe
