@@ -1,4 +1,4 @@
-name: Build Downloader
+name: Build Super Downloader
 
 on:
   push:
@@ -6,31 +6,36 @@ on:
 
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout
+    - name: Checkout source
       uses: actions/checkout@v4
 
-    - name: Install vcpkg (Official Way)
+    - name: Install dependencies
       run: |
-        git clone https://github.com/microsoft/vcpkg.git C:/vcpkg
-        C:/vcpkg/bootstrap-vcpkg.bat
+        sudo apt update
+        sudo apt install -y mingw-w64 cmake g++-multilib libcurl4-openssl-dev libssl-dev
 
-    - name: Install dependencies via vcpkg
+    - name: Create build directory
+      run: mkdir -p build
+
+    - name: Configure CMake for cross-compilation
       run: |
-        C:/vcpkg/vcpkg install curl:x64-windows openssl:x64-windows
-        C:/vcpkg/vcpkg integrate install
+        cd build
+        cmake .. \
+          -DCMAKE_SYSTEM_NAME=Windows \
+          -DCMAKE_C_COMPILER=x86_64-w64-mingw32-gcc \
+          -DCMAKE_CXX_COMPILER=x86_64-w64-mingw32-g++ \
+          -DCMAKE_BUILD_TYPE=Release
 
-    - name: Configure CMake
+    - name: Build project
       run: |
-        cmake -B build -S . -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake -A x64
+        cd build
+        cmake --build . --config Release
 
-    - name: Build
-      run: cmake --build build --config Release
-
-    - name: Upload EXE
+    - name: Upload Windows exe
       uses: actions/upload-artifact@v4
       with:
-        name: downloader
+        name: super_downloader
         path: build/Release/*.exe
