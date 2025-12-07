@@ -12,28 +12,41 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # 配置 git 支持长路径
+      - name: Enable long paths
+        run: git config --system core.longpaths true
+
+      # 使用 RUNNER_TEMP 目录存放 vcpkg，避免 USERPROFILE 路径空格问题
       - name: Install vcpkg
+        shell: cmd
         run: |
-          git clone https://github.com/microsoft/vcpkg.git %USERPROFILE%\vcpkg
-          %USERPROFILE%\vcpkg\bootstrap-vcpkg.bat
+          set VCPKG_DIR=%RUNNER_TEMP%\vcpkg
+          git clone https://github.com/microsoft/vcpkg.git "%VCPKG_DIR%"
+          "%VCPKG_DIR%\bootstrap-vcpkg.bat"
+          setx VCPKG_ROOT "%VCPKG_DIR%"
 
       - name: Install dependencies via vcpkg
+        shell: cmd
         run: |
-          %USERPROFILE%\vcpkg\vcpkg install curl:x64-windows openssl:x64-windows
-          %USERPROFILE%\vcpkg\vcpkg integrate install
+          set VCPKG_DIR=%RUNNER_TEMP%\vcpkg
+          "%VCPKG_DIR%\vcpkg" install curl:x64-windows openssl:x64-windows
+          "%VCPKG_DIR%\vcpkg" integrate install
 
       - name: Create build directory
-        run: mkdir build
+        shell: cmd
+        run: mkdir "build"
 
       - name: Configure CMake
+        shell: cmd
         run: |
           cd build
           cmake .. ^
-            -DCMAKE_TOOLCHAIN_FILE=%USERPROFILE%\vcpkg\scripts\buildsystems\vcpkg.cmake ^
+            -DCMAKE_TOOLCHAIN_FILE="%RUNNER_TEMP%\vcpkg\scripts\buildsystems\vcpkg.cmake" ^
             -DVCPKG_TARGET_TRIPLET=x64-windows ^
             -DCMAKE_BUILD_TYPE=Release
 
       - name: Build project
+        shell: cmd
         run: |
           cd build
           cmake --build . --config Release
@@ -42,4 +55,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: super_downloader
-          path: build/Release/*.exe
+          path: "build\\Release\\*.exe"
