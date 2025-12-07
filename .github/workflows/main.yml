@@ -1,58 +1,57 @@
-name: Build Super Downloader (Windows EXE)
+name: Build super_downloader
 
 on:
   push:
+  pull_request:
   workflow_dispatch:
 
 jobs:
-  build:
+  build_windows:
     runs-on: windows-latest
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+    # Checkout repository
+    - name: Checkout repo
+      uses: actions/checkout@v4
 
-      # 配置 git 支持长路径
-      - name: Enable long paths
-        run: git config --system core.longpaths true
+    # Cache vcpkg installed packages
+    - name: Cache vcpkg
+      uses: actions/cache@v3
+      with:
+        path: |
+          C:\vcpkg\installed
+          C:\vcpkg\packages
+        key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
+        restore-keys: |
+          vcpkg-${{ runner.os }}-
 
-      # 使用 RUNNER_TEMP 目录存放 vcpkg，避免 USERPROFILE 路径空格问题
-      - name: Install vcpkg
-        shell: cmd
-        run: |
-          set VCPKG_DIR=%RUNNER_TEMP%\vcpkg
-          git clone https://github.com/microsoft/vcpkg.git "%VCPKG_DIR%"
-          "%VCPKG_DIR%\bootstrap-vcpkg.bat"
-          setx VCPKG_ROOT "%VCPKG_DIR%"
+    # Install vcpkg if not exists
+    - name: Setup vcpkg
+      run: |
+        if not exist C:\vcpkg (
+          git clone https://github.com/microsoft/vcpkg.git C:\vcpkg
+          C:\vcpkg\bootstrap-vcpkg.bat
+        )
 
-      - name: Install dependencies via vcpkg
-        shell: cmd
-        run: |
-          set VCPKG_DIR=%RUNNER_TEMP%\vcpkg
-          "%VCPKG_DIR%\vcpkg" install curl:x64-windows openssl:x64-windows
-          "%VCPKG_DIR%\vcpkg" integrate install
+    # Install dependencies via vcpkg (curl + OpenSSL + zlib)
+    - name: Install dependencies
+      run: |
+        C:\vcpkg\vcpkg.exe install curl[core,ssl,non-http]:x64-windows
+        C:\vcpkg\vcpkg.exe install openssl:x64-windows
+        C:\vcpkg\vcpkg.exe install zlib:x64-windows
 
-      - name: Create build directory
-        shell: cmd
-        run: mkdir "build"
+    # Configure CMake
+    - name: Configure CMake
+      run: |
+        cmake -B build -S . -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake -DCMAKE_BUILD_TYPE=Release
 
-      - name: Configure CMake
-        shell: cmd
-        run: |
-          cd build
-          cmake .. ^
-            -DCMAKE_TOOLCHAIN_FILE="%RUNNER_TEMP%\vcpkg\scripts\buildsystems\vcpkg.cmake" ^
-            -DVCPKG_TARGET_TRIPLET=x64-windows ^
-            -DCMAKE_BUILD_TYPE=Release
+    # Build the project
+    - name: Build
+      run: cmake --build build --config Release
 
-      - name: Build project
-        shell: cmd
-        run: |
-          cd build
-          cmake --build . --config Release
-
-      - name: Upload exe
-        uses: actions/upload-artifact@v4
-        with:
-          name: super_downloader
-          path: "build\\Release\\*.exe"
+    # Archive the exe as artifact
+    - name: Upload artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: super_downloader
+        path: build/Release/super_downloader.exe
