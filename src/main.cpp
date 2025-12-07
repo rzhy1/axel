@@ -26,8 +26,6 @@ std::unique_ptr<RateLimiter> global_limiter;
 // ---------------- 下载回调 ----------------
 size_t write_data(void* ptr, size_t size, size_t nmemb, void* stream) {
     size_t total = size * nmemb;
-
-    // 限速
     if(global_limiter) global_limiter->consume(total);
 
     FILE* f = (FILE*)stream;
@@ -66,13 +64,13 @@ int main(int argc, char** argv) {
     // 限速示例 1MB/s
     global_limiter = std::make_unique<RateLimiter>(1024*1024);
 
-    // 多线程下载示例（简单分割，可拓展）
+    // 多线程下载示例（简单分块可扩展）
     int threads_count = 4;
     std::vector<std::thread> threads;
 
     for(int i=0; i<threads_count; ++i) {
         threads.emplace_back([&]{
-            download_file(url, out); // 简单示例，多个线程写同一个文件需要加锁或分块
+            download_file(url, out);
         });
     }
 
