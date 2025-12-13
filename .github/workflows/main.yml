@@ -18,6 +18,7 @@ jobs:
           autoconf \
           automake \
           libtool \
+          gettext \
           pkg-config \
           make
 
