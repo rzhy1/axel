@@ -1,57 +1,68 @@
-name: Build super_downloader
+name: Build Axel (Windows Static)
 
 on:
   push:
-  pull_request:
   workflow_dispatch:
 
 jobs:
-  build_windows:
-    runs-on: windows-latest
+  build:
+    runs-on: ubuntu-latest
 
     steps:
-    # Checkout repository
-    - name: Checkout repo
-      uses: actions/checkout@v4
-
-    # Cache vcpkg installed packages
-    - name: Cache vcpkg
-      uses: actions/cache@v4
-      with:
-        path: |
-          C:\vcpkg\installed
-          C:\vcpkg\packages
-        key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
-        restore-keys: |
-          vcpkg-${{ runner.os }}-
-
-    # Install vcpkg if not exists
-    - name: Setup vcpkg
+    - name: Install build dependencies
       run: |
-        if (-Not (Test-Path "C:\vcpkg")) {
-          git clone https://github.com/microsoft/vcpkg.git C:\vcpkg
-          & C:\vcpkg\bootstrap-vcpkg.bat
-        }
+        sudo apt-get update
+        sudo apt-get install -y \
+          git \
+          mingw-w64 \
+          autoconf \
+          automake \
+          libtool \
+          pkg-config \
+          make
 
-    # Install dependencies via vcpkg (curl + OpenSSL + zlib)
-    - name: Install dependencies
+    - name: Clone axel source
       run: |
-        C:\vcpkg\vcpkg.exe install curl[core,ssl,non-http]:x64-windows
-        C:\vcpkg\vcpkg.exe install openssl:x64-windows
-        C:\vcpkg\vcpkg.exe install zlib:x64-windows
+        git clone https://github.com/axel-download-accelerator/axel.git
+        cd axel
+        git submodule update --init --recursive
 
-    # Configure CMake
-    - name: Configure CMake
+    - name: Prepare build environment
       run: |
-        cmake -B build -S . -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake -DCMAKE_BUILD_TYPE=Release
+        echo "CC=x86_64-w64-mingw32-gcc" >> $GITHUB_ENV
+        echo "AR=x86_64-w64-mingw32-ar" >> $GITHUB_ENV
+        echo "RANLIB=x86_64-w64-mingw32-ranlib" >> $GITHUB_ENV
+        echo "STRIP=x86_64-w64-mingw32-strip" >> $GITHUB_ENV
+        echo "CFLAGS=-O2 -static" >> $GITHUB_ENV
+        echo "LDFLAGS=-static -static-libgcc -static-libstdc++" >> $GITHUB_ENV
 
-    # Build the project
+    - name: Generate configure script
+      run: |
+        cd axel
+        autoreconf -fi
+
+    - name: Configure (Windows static)
+      run: |
+        cd axel
+        ./configure \
+          --host=x86_64-w64-mingw32 \
+          --disable-nls \
+          --disable-shared \
+          --enable-static \
+          --without-ssl
+
     - name: Build
-      run: cmake --build build --config Release
+      run: |
+        cd axel
+        make -j$(nproc)
 
-    # Archive the exe as artifact
+    - name: Strip binary
+      run: |
+        cd axel
+        x86_64-w64-mingw32-strip axel.exe
+
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: super_downloader
-        path: build/Release/super_downloader.exe
+        name: axel-windows-static
+        path: axel/axel.exe
