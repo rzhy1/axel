@@ -63,6 +63,9 @@ jobs:
           --without-ssl \
           ac_cv_header_arpa_inet_h=yes \
           ac_cv_header_netdb_h=yes \
+          ac_cv_header_netinet_in_h=yes \
+          ac_cv_header_sys_socket_h=yes \
+          ac_cv_header_sys_time_h=yes \
           LIBS="-lws2_32"
 
     - name: Build
