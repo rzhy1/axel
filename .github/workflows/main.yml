@@ -21,7 +21,7 @@ jobs:
           autopoint \
           pkg-config \
           make \
-          autoconf-archive    # 新增这一行
+          autoconf-archive
 
     - name: Build and Install Autoconf 2.72
       run: |
@@ -51,8 +51,8 @@ jobs:
     - name: Generate configure script
       run: |
         cd axel
-        export AUTOPOINT=true
-        autoreconf -fi
+        mkdir -p m4 build-aux   # 创建缺失的目录
+        autoreconf -fi          # 不再跳过 autopoint
 
     - name: Configure (Windows static)
       run: |
