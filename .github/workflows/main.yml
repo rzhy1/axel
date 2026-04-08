@@ -125,6 +125,13 @@ jobs:
         \treturn 80;\
         }' src/text.c
 
+        # ---------- src/random.c: Disable /dev/random requirement ----------
+        sed -i '/^axel_rnd_init(/,/^}/c\
+        axel_rnd_init(void)\
+        {\
+        \treturn 0;\
+        }' src/random.c
+
         echo "All fixes applied."
         EOF
 
