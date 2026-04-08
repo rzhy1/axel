@@ -108,18 +108,22 @@ jobs:
         sed -i 's|setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, &tout, sizeof(tout))|setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)\&tout, sizeof(tout))|' src/tcp.c
         sed -i 's|setsockopt(sock_fd, SOL_SOCKET, SO_SNDTIMEO, &tout, sizeof(tout))|setsockopt(sock_fd, SOL_SOCKET, SO_SNDTIMEO, (const char *)\&tout, sizeof(tout))|' src/tcp.c
 
-        # ---------- Disable get_if_ip on Windows ----------
-        # Insert #ifdef __MINGW32__ at the start of the function, and #endif at the end
-        sed -i '/^int get_if_ip(/i #ifndef __MINGW32__' src/tcp.c
-        echo '#else  /* __MINGW32__ */' >> src/tcp.c
-        echo 'int get_if_ip(char *iface, struct sockaddr *sa) { (void)iface; (void)sa; return -1; }' >> src/tcp.c
-        echo '#endif /* __MINGW32__ */' >> src/tcp.c
+        # ---------- Override get_if_ip with a simple stub ----------
+        sed -i '/^get_if_ip(/,/^}/c\
+        get_if_ip(char *dst, size_t len, const char *iface)\
+        {\
+        \t(void)dst;\
+        \t(void)len;\
+        \t(void)iface;\
+        \treturn -1;\
+        }' src/tcp.c
 
-        # ---------- src/text.c: Disable get_term_width on Windows ----------
-        sed -i '/^int get_term_width(/i #ifndef __MINGW32__' src/text.c
-        echo '#else  /* __MINGW32__ */' >> src/text.c
-        echo 'int get_term_width(void) { return 80; }' >> src/text.c
-        echo '#endif /* __MINGW32__ */' >> src/text.c
+        # ---------- Override get_term_width with a simple stub ----------
+        sed -i '/^get_term_width(/,/^}/c\
+        get_term_width(void)\
+        {\
+        \treturn 80;\
+        }' src/text.c
 
         echo "All fixes applied."
         EOF
