@@ -6,7 +6,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-24.10   # 关键修改：使用 Ubuntu 24.10
+    runs-on: ubuntu-24.04  # 使用官方支持的稳定版
 
     steps:
     - name: Install build dependencies
@@ -15,13 +15,24 @@ jobs:
         sudo apt-get install -y \
           git \
           mingw-w64 \
-          autoconf \
           automake \
           libtool \
           gettext \
           autopoint \
           pkg-config \
           make
+
+    - name: Build and Install Autoconf 2.72
+      run: |
+        # 下载并编译 Autoconf 2.72
+        wget https://ftp.gnu.org/gnu/autoconf/autoconf-2.72.tar.xz
+        tar -xf autoconf-2.72.tar.xz
+        cd autoconf-2.72
+        ./configure --prefix=/usr/local
+        make -j$(nproc)
+        sudo make install
+        # 验证版本
+        autoconf --version
 
     - name: Clone axel source
       run: |
