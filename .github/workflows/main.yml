@@ -40,7 +40,7 @@ jobs:
         cd axel
         git submodule update --init --recursive
 
-    - name: Create and run fix script for axel.h
+    - name: Create and run fix script
       run: |
         cd axel
         cat > fix-axel.sh << 'EOF'
@@ -60,7 +60,7 @@ jobs:
         #define AF_UNSPEC 0\
         #endif' src/axel.h
 
-        # 2. Comment out #include <net/if.h> (not needed on Windows)
+        # 2. Comment out #include <net/if.h>
         sed -i 's|^#include <net/if.h>|/* #include <net/if.h> */  /* Not needed on Windows */|' src/axel.h
 
         # 3. Undefine min/max to avoid conflict with Windows headers
@@ -79,18 +79,25 @@ jobs:
         echo '/* Windows lacks ssize_t */' >> src/axel.h
         echo 'typedef long long ssize_t;' >> src/axel.h
 
-        # 5. Remove any previous duplicate UINT64_C definition (if accidentally added)
+        # 5. Remove any previous duplicate UINT64_C definition
         sed -i '/^#define UINT64_C(c) c ## ULL$/d' src/axel.h
 
-        # 6. Fix %jd format specifiers: replace with %lld and cast arguments to (long long)
+        # 6. Fix %jd format specifiers in src/axel.c and src/conn.c
         sed -i 's|"File size: %s (%jd bytes)"|"File size: %s (%lld bytes)"|' src/axel.c
         sed -i 's|"State file found: %jd bytes downloaded, %jd to go."|"State file found: %lld bytes downloaded, %lld to go."|' src/axel.c
         sed -i 's|"REST %jd"|"REST %lld"|' src/conn.c
 
-        # Cast the corresponding arguments
+        # Cast corresponding arguments in axel.c and conn.c
         sed -i '/axl_message.*File size/s/axl->size/(long long)axl->size/' src/axel.c
         sed -i '/State file found/s/axl->bytes_done/(long long)axl->bytes_done/; /State file found/s/axl->start_byte/(long long)axl->start_byte/' src/axel.c
         sed -i '/ftp_command.*REST/s/conn->currentbyte/(long long)conn->currentbyte/' src/conn.c
+
+        # 7. Fix %jd in src/http.c (Range headers)
+        sed -i 's|"Range: bytes=%jd-%jd"|"Range: bytes=%lld-%lld"|' src/http.c
+        sed -i 's|"Range: bytes=%jd-"|"Range: bytes=%lld-"|' src/http.c
+        # Cast arguments in http.c for http_addheader calls with Range
+        sed -i '/http_addheader.*Range: bytes=%lld-%lld/s/conn->lastbyte, conn->currentbyte/(long long)conn->lastbyte, (long long)conn->currentbyte/' src/http.c
+        sed -i '/http_addheader.*Range: bytes=%lld-/s/conn->currentbyte/(long long)conn->currentbyte/' src/http.c
         EOF
 
         chmod +x fix-axel.sh
@@ -114,6 +121,8 @@ jobs:
         touch fake-headers/net/if_arp.h
         mkdir -p fake-headers/linux
         touch fake-headers/linux/if_ether.h
+        mkdir -p fake-headers/sys
+        touch fake-headers/sys/socket.h
         echo "CFLAGS=-O2 -static -D_WIN32_WINNT=0x0600 -DO_NONBLOCK=0x4000 -D__USE_MINGW_ANSI_STDIO=1 -I$(pwd)/fake-headers" >> $GITHUB_ENV
         echo "LDFLAGS=-static -static-libgcc -static-libstdc++" >> $GITHUB_ENV
 
