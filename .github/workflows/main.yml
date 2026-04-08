@@ -69,6 +69,9 @@ jobs:
           ac_cv_header_sys_ioctl_h=yes \
           ac_cv_header_sys_select_h=yes \
           ac_cv_header_termios_h=yes \
+          ac_cv_func_nanosleep=yes \
+          ac_cv_func_gettimeofday=yes \
+          ac_cv_func_select=yes \
           LIBS="-lws2_32"
 
     - name: Build
