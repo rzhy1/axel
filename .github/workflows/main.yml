@@ -6,7 +6,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-24.04  # 使用官方支持的稳定版
+    runs-on: ubuntu-24.04
 
     steps:
     - name: Install build dependencies
@@ -20,18 +20,17 @@ jobs:
           gettext \
           autopoint \
           pkg-config \
-          make
+          make \
+          autoconf-archive    # 新增这一行
 
     - name: Build and Install Autoconf 2.72
       run: |
-        # 下载并编译 Autoconf 2.72
         wget https://ftp.gnu.org/gnu/autoconf/autoconf-2.72.tar.xz
         tar -xf autoconf-2.72.tar.xz
         cd autoconf-2.72
         ./configure --prefix=/usr/local
         make -j$(nproc)
         sudo make install
-        # 验证版本
         autoconf --version
 
     - name: Clone axel source
@@ -52,7 +51,7 @@ jobs:
     - name: Generate configure script
       run: |
         cd axel
-        export AUTOPOINT=true   # 继续跳过 autopoint
+        export AUTOPOINT=true
         autoreconf -fi
 
     - name: Configure (Windows static)
