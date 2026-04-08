@@ -45,7 +45,9 @@ jobs:
         echo "AR=x86_64-w64-mingw32-ar" >> $GITHUB_ENV
         echo "RANLIB=x86_64-w64-mingw32-ranlib" >> $GITHUB_ENV
         echo "STRIP=x86_64-w64-mingw32-strip" >> $GITHUB_ENV
-        echo "CFLAGS=-O2 -static" >> $GITHUB_ENV
+        # 关键：在 CFLAGS 中预先定义 O_NONBLOCK 宏（MinGW 常用值 0x4000）
+        # 同时定义 _WIN32_WINNT 以启用新版 Windows API
+        echo "CFLAGS=-O2 -static -D_WIN32_WINNT=0x0600 -DO_NONBLOCK=0x4000" >> $GITHUB_ENV
         echo "LDFLAGS=-static -static-libgcc -static-libstdc++" >> $GITHUB_ENV
 
     - name: Generate configure script
