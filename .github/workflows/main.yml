@@ -72,6 +72,7 @@ jobs:
           ac_cv_func_nanosleep=yes \
           ac_cv_func_gettimeofday=yes \
           ac_cv_func_select=yes \
+          ac_cv_decl_O_NONBLOCK=yes \
           LIBS="-lws2_32"
 
     - name: Build
