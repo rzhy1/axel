@@ -114,6 +114,7 @@ jobs:
         touch fake-headers/netinet/in.h
         touch fake-headers/netinet/ip.h
         touch fake-headers/netinet/if_ether.h
+        touch fake-headers/netinet/tcp.h
         mkdir -p fake-headers/arpa
         touch fake-headers/arpa/inet.h
         mkdir -p fake-headers/net
@@ -124,7 +125,6 @@ jobs:
         mkdir -p fake-headers/sys
         touch fake-headers/sys/socket.h
         touch fake-headers/sys/ioctl.h
-        # 新增 netdb.h 假头文件
         touch fake-headers/netdb.h
         echo "CFLAGS=-O2 -static -D_WIN32_WINNT=0x0600 -DO_NONBLOCK=0x4000 -D__USE_MINGW_ANSI_STDIO=1 -I$(pwd)/fake-headers" >> $GITHUB_ENV
         echo "LDFLAGS=-static -static-libgcc -static-libstdc++" >> $GITHUB_ENV
@@ -148,6 +148,7 @@ jobs:
           ac_cv_header_netinet_in_systm_h=yes \
           ac_cv_header_netinet_ip_h=yes \
           ac_cv_header_netinet_if_ether_h=yes \
+          ac_cv_header_netinet_tcp_h=yes \
           ac_cv_header_net_if_h=yes \
           ac_cv_header_net_if_arp_h=yes \
           ac_cv_header_linux_if_ether_h=yes \
