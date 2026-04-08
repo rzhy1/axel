@@ -125,9 +125,12 @@ jobs:
         \treturn 80;\
         }' src/text.c
 
-        # ---------- Fix /dev/random on Windows ----------
-        # Disable reading from /dev/random, just return success
-        sed -i 's|if ((fd = open("/dev/random", O_RDONLY)) != -1)|if (0)|' src/random.c
+        # ---------- src/random.c: Disable /dev/random requirement ----------
+        sed -i '/^axel_rnd_init(/,/^}/c\
+        axel_rnd_init(void)\
+        {\
+        \treturn 0;\
+        }' src/random.c
 
         echo "All fixes applied."
         EOF
@@ -206,7 +209,7 @@ jobs:
         Name: OpenSSL-libcrypto
         Description: OpenSSL cryptography library
         Version: 3.6.2
-        Libs: -L\${libdir} -lcrypto -lws2_32 -lgdi32 -lcrypt32
+        Libs: -L\${libdir} -lcrypto -lws2_32 -lgdi32 -lcrypt32 -ladvapi32
         Cflags: -I\${includedir}
         EOF
 
@@ -251,7 +254,7 @@ jobs:
           ac_cv_func_gettimeofday=yes \
           ac_cv_func_select=yes \
           ac_cv_decl_O_NONBLOCK=yes \
-          LIBS="-lws2_32"
+          LIBS="-lws2_32 -ladvapi32"
 
     - name: Build
       run: |
