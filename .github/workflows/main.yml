@@ -66,6 +66,9 @@ jobs:
           ac_cv_header_netinet_in_h=yes \
           ac_cv_header_sys_socket_h=yes \
           ac_cv_header_sys_time_h=yes \
+          ac_cv_header_sys_ioctl_h=yes \
+          ac_cv_header_sys_select_h=yes \
+          ac_cv_header_termios_h=yes \
           LIBS="-lws2_32"
 
     - name: Build
