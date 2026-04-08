@@ -40,13 +40,51 @@ jobs:
         cd axel
         git submodule update --init --recursive
 
+    - name: Create patch for Windows compatibility
+      run: |
+        cd axel
+        cat > windows-fixes.patch << 'EOF'
+        diff --git a/src/axel.h b/src/axel.h
+        index 0000000..0000000 100644
+        --- a/src/axel.h
+        +++ b/src/axel.h
+        @@ -50,6 +50,17 @@
+         #include <sys/types.h>
+         #include <regex.h>
+         
+        +/* Windows/MinGW compatibility */
+        +#ifdef __MINGW32__
+        +#include <stdint.h>
+        +#include <ws2tcpip.h>
+        +#define sa_family_t ADDRESS_FAMILY
+        +#define AF_INET   2
+        +#define AF_INET6  23
+        +#define AF_UNSPEC 0
+        +#define UINT64_C(c) c ## ULL
+        +#endif
+        +
+         #ifdef ENABLE_NLS
+         # include <libintl.h>
+         # define _(x) gettext(x)
+        @@ -145,6 +156,9 @@ void axel_message(axel_t *, const char *, ...);
+         int axel_http_get(axel_t *axel, conn_t *conn);
+         int axel_ftp_get(axel_t *axel, conn_t *conn);
+         
+        +/* Windows lacks ssize_t, provide it */
+        +typedef long long ssize_t;
+        +
+         ssize_t axel_rand64(uint64_t *);
+         
+         /* Abort helpers */
+        EOF
+        patch -p1 < windows-fixes.patch
+
     - name: Prepare build environment
       run: |
         echo "CC=x86_64-w64-mingw32-gcc" >> $GITHUB_ENV
         echo "AR=x86_64-w64-mingw32-ar" >> $GITHUB_ENV
         echo "RANLIB=x86_64-w64-mingw32-ranlib" >> $GITHUB_ENV
         echo "STRIP=x86_64-w64-mingw32-strip" >> $GITHUB_ENV
-        # 创建假头文件目录
         mkdir -p fake-headers/netinet
         touch fake-headers/netinet/in_systm.h
         touch fake-headers/netinet/in.h
