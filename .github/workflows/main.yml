@@ -46,7 +46,7 @@ jobs:
         cat > windows.patch << 'EOF'
         --- a/src/axel.h
         +++ b/src/axel.h
-        @@ -59,10 +59,21 @@
+        @@ -59,10 +59,23 @@
          #include <stdbool.h>
          #include <sys/stat.h>
          #include <sys/time.h>
@@ -58,7 +58,6 @@ jobs:
         +#define AF_INET   2
         +#define AF_INET6  23
         +#define AF_UNSPEC 0
-        +#define UINT64_C(c) c ## ULL
         +#endif
         +
          #include <netinet/in_systm.h>
@@ -70,7 +69,24 @@ jobs:
          #include <pthread.h>
          #include "compat-android.h"
          #include "compat-bsd.h"
-        @@ -145,6 +156,9 @@
+        @@ -117,11 +130,17 @@ typedef message_t axel_if_t;
+         #include "conn.h"
+         #include "ssl.h"
+         #include "search.h"
+         
+        +/* Windows defines min/max, undefine to use Axel's own */
+        +#ifdef min
+        +#undef min
+        +#endif
+        +#ifdef max
+        +#undef max
+        +#endif
+         #define min(a, b) \
+         	({ \
+         		__typeof__(a) __a = (a);	\
+         		__typeof__(b) __b = (b);	\
+         		__a < __b ? __a : __b;		\
+        @@ -145,6 +164,9 @@ typedef struct {
          int axel_http_get(axel_t *axel, conn_t *conn);
          int axel_ftp_get(axel_t *axel, conn_t *conn);
          
@@ -101,7 +117,7 @@ jobs:
         touch fake-headers/net/if_arp.h
         mkdir -p fake-headers/linux
         touch fake-headers/linux/if_ether.h
-        echo "CFLAGS=-O2 -static -D_WIN32_WINNT=0x0600 -DO_NONBLOCK=0x4000 -I$(pwd)/fake-headers" >> $GITHUB_ENV
+        echo "CFLAGS=-O2 -static -D_WIN32_WINNT=0x0600 -DO_NONBLOCK=0x4000 -D__USE_MINGW_ANSI_STDIO=1 -I$(pwd)/fake-headers" >> $GITHUB_ENV
         echo "LDFLAGS=-static -static-libgcc -static-libstdc++" >> $GITHUB_ENV
 
     - name: Generate configure script
