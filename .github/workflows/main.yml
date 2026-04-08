@@ -19,6 +19,7 @@ jobs:
           automake \
           libtool \
           gettext \
+          autopoint \
           pkg-config \
           make
 
@@ -40,6 +41,7 @@ jobs:
     - name: Generate configure script
       run: |
         cd axel
+        export AUTOPOINT=true   # 跳过 autopoint 调用
         autoreconf -fi
 
     - name: Configure (Windows static)
