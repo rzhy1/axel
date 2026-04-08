@@ -50,6 +50,8 @@ jobs:
         touch fake-headers/netinet/in_systm.h
         touch fake-headers/netinet/in.h
         touch fake-headers/netinet/ip.h
+        mkdir -p fake-headers/arpa
+        touch fake-headers/arpa/inet.h
         echo "CFLAGS=-O2 -static -D_WIN32_WINNT=0x0600 -DO_NONBLOCK=0x4000 -I$(pwd)/fake-headers" >> $GITHUB_ENV
         echo "LDFLAGS=-static -static-libgcc -static-libstdc++" >> $GITHUB_ENV
 
