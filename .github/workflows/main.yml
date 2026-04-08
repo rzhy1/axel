@@ -46,9 +46,9 @@ jobs:
         echo "AR=x86_64-w64-mingw32-ar" >> $GITHUB_ENV
         echo "RANLIB=x86_64-w64-mingw32-ranlib" >> $GITHUB_ENV
         echo "STRIP=x86_64-w64-mingw32-strip" >> $GITHUB_ENV
-        # 创建假头文件以绕过 netinet/in_systm.h 缺失
         mkdir -p fake-headers/netinet
         touch fake-headers/netinet/in_systm.h
+        touch fake-headers/netinet/in.h
         echo "CFLAGS=-O2 -static -D_WIN32_WINNT=0x0600 -DO_NONBLOCK=0x4000 -I$(pwd)/fake-headers" >> $GITHUB_ENV
         echo "LDFLAGS=-static -static-libgcc -static-libstdc++" >> $GITHUB_ENV
 
