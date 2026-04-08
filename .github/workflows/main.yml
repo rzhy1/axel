@@ -125,6 +125,10 @@ jobs:
         \treturn 80;\
         }' src/text.c
 
+        # ---------- Fix /dev/random on Windows ----------
+        # Disable reading from /dev/random, just return success
+        sed -i 's|if ((fd = open("/dev/random", O_RDONLY)) != -1)|if (0)|' src/random.c
+
         echo "All fixes applied."
         EOF
 
@@ -183,7 +187,6 @@ jobs:
         )
         CFLAGS="-O2 -ffunction-sections -fdata-sections -pipe -g0 -fvisibility=hidden"
         LDFLAGS="-Wl,--gc-sections -Wl,--icf=all -static -static-libgcc"
-        # 移除 --cross-compile-prefix，mingw64 目标会自动使用 x86_64-w64-mingw32- 前缀
         ./Configure -static \
           --prefix="$INSTALL_PATH" \
           --libdir=lib \
