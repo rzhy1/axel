@@ -6,7 +6,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.10   # 关键修改：使用 Ubuntu 24.10
 
     steps:
     - name: Install build dependencies
@@ -41,7 +41,7 @@ jobs:
     - name: Generate configure script
       run: |
         cd axel
-        export AUTOPOINT=true   # 跳过 autopoint 调用
+        export AUTOPOINT=true   # 继续跳过 autopoint
         autoreconf -fi
 
     - name: Configure (Windows static)
