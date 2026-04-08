@@ -40,64 +40,40 @@ jobs:
         cd axel
         git submodule update --init --recursive
 
-    - name: Create and apply Windows compatibility patch
+    - name: Apply Windows compatibility fixes to axel.h
       run: |
-        cd axel
-        cat > windows.patch << 'EOF'
-        --- a/src/axel.h
-        +++ b/src/axel.h
-        @@ -59,10 +59,23 @@
-         #include <stdbool.h>
-         #include <sys/stat.h>
-         #include <sys/time.h>
-        +/* Windows/MinGW compatibility */
-        +#ifdef __MINGW32__
-        +#include <stdint.h>
-        +#include <ws2tcpip.h>
-        +#define sa_family_t ADDRESS_FAMILY
-        +#define AF_INET   2
-        +#define AF_INET6  23
-        +#define AF_UNSPEC 0
-        +#endif
-        +
-         #include <netinet/in_systm.h>
-         #include <netinet/in.h>
-         #include <netinet/ip.h>
-         #include <arpa/inet.h>
-        -#include <net/if.h>
-        +/* #include <net/if.h> */  /* Not needed on Windows */
-         #include <pthread.h>
-         #include "compat-android.h"
-         #include "compat-bsd.h"
-        @@ -117,11 +130,17 @@ typedef message_t axel_if_t;
-         #include "conn.h"
-         #include "ssl.h"
-         #include "search.h"
-         
-        +/* Windows defines min/max, undefine to use Axel's own */
-        +#ifdef min
-        +#undef min
-        +#endif
-        +#ifdef max
-        +#undef max
-        +#endif
-         #define min(a, b) \
-         	({ \
-         		__typeof__(a) __a = (a);	\
-         		__typeof__(b) __b = (b);	\
-         		__a < __b ? __a : __b;		\
-        @@ -145,6 +164,9 @@ typedef struct {
-         int axel_http_get(axel_t *axel, conn_t *conn);
-         int axel_ftp_get(axel_t *axel, conn_t *conn);
-         
-        +/* Windows lacks ssize_t */
-        +typedef long long ssize_t;
-        +
-         ssize_t axel_rand64(uint64_t *);
-         
-         /* Abort helpers */
-        EOF
-        patch -p1 < windows.patch
+        cd axel/src
+        # 1. 在 #include <sys/time.h> 之后插入 MinGW 兼容代码块
+        sed -i '/^#include <sys\/time.h>/a \
+/* Windows/MinGW compatibility */\
+#ifdef __MINGW32__\
+#include <stdint.h>\
+#include <ws2tcpip.h>\
+#define sa_family_t ADDRESS_FAMILY\
+#define AF_INET   2\
+#define AF_INET6  23\
+#define AF_UNSPEC 0\
+#endif' axel.h
+        
+        # 2. 注释掉 #include <net/if.h>
+        sed -i 's/^#include <net\/if.h>/\/\* #include <net\/if.h> \*\/  \/* Not needed on Windows *\//' axel.h
+        
+        # 3. 在 #include "search.h" 之后插入 min/max 的 undef
+        sed -i '/^#include "search.h"/a \
+\
+/* Windows defines min/max, undefine to use Axel'"'"'s own */\
+#ifdef min\
+#undef min\
+#endif\
+#ifdef max\
+#undef max\
+#endif' axel.h
+        
+        # 4. 在 ssize_t axel_rand64 声明之前添加 ssize_t 类型定义
+        #    先找到那一行，然后在该行之前插入
+        sed -i '/^ssize_t axel_rand64/i \
+/* Windows lacks ssize_t */\
+typedef long long ssize_t;' axel.h
 
     - name: Prepare build environment
       run: |
