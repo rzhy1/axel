@@ -94,7 +94,6 @@ jobs:
         sed -i '/http_addheader.*Range: bytes=%lld-/s/conn->currentbyte/(long long)conn->currentbyte/' src/http.c
 
         # ---------- src/tcp.c: Replace fcntl with ioctlsocket ----------
-        # Replace all occurrences of fcntl for setting non-blocking
         sed -i 's/fcntl(sock_fd, F_SETFL, O_NONBLOCK)/{\
         \tunsigned long mode = 1;\
         \tioctlsocket(sock_fd, FIONBIO, \&mode);\
@@ -104,28 +103,23 @@ jobs:
         \tioctlsocket(sock_fd, FIONBIO, \&mode);\
         }/g' src/tcp.c
 
-        # Replace timeout struct timeval with DWORD
         sed -i '/struct timeval tout;/c\\tDWORD tout = DEFAULT_IO_TIMEOUT * 1000;' src/tcp.c
 
-        # Cast setsockopt arguments
         sed -i 's|setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, &tout, sizeof(tout))|setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)\&tout, sizeof(tout))|' src/tcp.c
         sed -i 's|setsockopt(sock_fd, SOL_SOCKET, SO_SNDTIMEO, &tout, sizeof(tout))|setsockopt(sock_fd, SOL_SOCKET, SO_SNDTIMEO, (const char *)\&tout, sizeof(tout))|' src/tcp.c
 
-        # Disable get_if_ip function entirely (return -1)
-        sed -i '/^int get_if_ip(/,/^}$/c\
-        int get_if_ip(char *iface, struct sockaddr *sa)\
-        {\
-        \t(void)iface;\
-        \t(void)sa;\
-        \treturn -1;\
-        }' src/tcp.c
+        # ---------- Disable get_if_ip on Windows ----------
+        # Insert #ifdef __MINGW32__ at the start of the function, and #endif at the end
+        sed -i '/^int get_if_ip(/i #ifndef __MINGW32__' src/tcp.c
+        echo '#else  /* __MINGW32__ */' >> src/tcp.c
+        echo 'int get_if_ip(char *iface, struct sockaddr *sa) { (void)iface; (void)sa; return -1; }' >> src/tcp.c
+        echo '#endif /* __MINGW32__ */' >> src/tcp.c
 
-        # ---------- src/text.c: Disable terminal width detection ----------
-        sed -i '/^int get_term_width(/,/^}$/c\
-        int get_term_width(void)\
-        {\
-        \treturn 80;\
-        }' src/text.c
+        # ---------- src/text.c: Disable get_term_width on Windows ----------
+        sed -i '/^int get_term_width(/i #ifndef __MINGW32__' src/text.c
+        echo '#else  /* __MINGW32__ */' >> src/text.c
+        echo 'int get_term_width(void) { return 80; }' >> src/text.c
+        echo '#endif /* __MINGW32__ */' >> src/text.c
 
         echo "All fixes applied."
         EOF
