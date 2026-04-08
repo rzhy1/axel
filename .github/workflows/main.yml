@@ -1,4 +1,4 @@
-name: Build Axel (Windows Static)
+name: Build Axel (Windows Static) with HTTPS Support
 
 on:
   push:
@@ -125,13 +125,6 @@ jobs:
         \treturn 80;\
         }' src/text.c
 
-        # ---------- src/random.c: Disable /dev/random requirement ----------
-        sed -i '/^axel_rnd_init(/,/^}/c\
-        axel_rnd_init(void)\
-        {\
-        \treturn 0;\
-        }' src/random.c
-
         echo "All fixes applied."
         EOF
 
@@ -170,12 +163,73 @@ jobs:
         mkdir -p m4 build-aux
         autoreconf -fi
 
-    - name: Configure (Windows static)
+    - name: Cross compile OpenSSL for Windows (static, optimized)
+      run: |
+        INSTALL_PATH=$(pwd)/openssl-mingw
+        mkdir -p "$INSTALL_PATH"
+        wget -q -O- https://github.com/openssl/openssl/releases/download/openssl-3.6.2/openssl-3.6.2.tar.gz | tar xz
+        cd openssl-* || exit
+        DISABLED_FEATURES=(
+          no-quic no-err no-dso no-engine no-async no-autoalginit
+          no-dtls no-sctp no-ssl3 no-tls1 no-tls1_1
+          no-comp no-ts no-ocsp no-ct no-cms no-psk no-srp no-srtp no-rfc3779
+          no-fips no-acvp-tests no-docs no-stdio no-ui-console
+          no-afalgeng no-ssl-trace no-filenames
+          no-aria no-bf no-blake2 no-camellia no-cast no-cmac
+          no-dh no-dsa no-ec2m no-gost no-idea no-rc2 no-rc4 no-rc5 no-rmd160
+          no-scrypt no-seed no-siphash no-siv no-sm2 no-sm3 no-sm4 no-whirlpool
+          no-tests no-apps
+        )
+        # 使用体积优化标志（适用于大多数现代处理器）
+        CFLAGS="-O2 -ffunction-sections -fdata-sections -pipe -g0 -fvisibility=hidden"
+        LDFLAGS="-Wl,--gc-sections -Wl,--icf=all -static -static-libgcc"
+        ./Configure -static \
+          --prefix="$INSTALL_PATH" \
+          --libdir=lib \
+          --cross-compile-prefix=x86_64-w64-mingw32- \
+          mingw64 no-shared \
+          "${DISABLED_FEATURES[@]}" \
+          $CFLAGS \
+          $LDFLAGS
+        make -j$(nproc)
+        make install_sw
+        # 生成 pkg-config 文件
+        cd "$INSTALL_PATH/lib"
+        cat > libcrypto.pc << EOF
+        prefix=$INSTALL_PATH
+        exec_prefix=\${prefix}
+        libdir=\${exec_prefix}/lib
+        includedir=\${prefix}/include
+
+        Name: OpenSSL-libcrypto
+        Description: OpenSSL cryptography library
+        Version: 3.6.2
+        Libs: -L\${libdir} -lcrypto -lws2_32 -lgdi32 -lcrypt32
+        Cflags: -I\${includedir}
+        EOF
+
+        cat > libssl.pc << EOF
+        prefix=$INSTALL_PATH
+        exec_prefix=\${prefix}
+        libdir=\${exec_prefix}/lib
+        includedir=\${prefix}/include
+
+        Name: OpenSSL
+        Description: Secure Sockets Layer and cryptography libraries
+        Version: 3.6.2
+        Requires.private: libcrypto
+        Libs: -L\${libdir} -lssl
+        Cflags: -I\${includedir}
+        EOF
+
+    - name: Configure (Windows static with SSL)
       run: |
         cd axel
+        export PKG_CONFIG_PATH=$(pwd)/../openssl-mingw/lib
         ./configure \
           --host=x86_64-w64-mingw32 \
           --disable-nls \
+          --with-ssl=openssl \
           ac_cv_header_arpa_inet_h=yes \
           ac_cv_header_netdb_h=yes \
           ac_cv_header_netinet_in_h=yes \
@@ -210,5 +264,5 @@ jobs:
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: axel-windows-static
+        name: axel-windows-static-ssl
         path: axel/axel.exe
