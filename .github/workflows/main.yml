@@ -176,7 +176,6 @@ jobs:
         ./configure \
           --host=x86_64-w64-mingw32 \
           --disable-nls \
-          --without-ssl \
           ac_cv_header_arpa_inet_h=yes \
           ac_cv_header_netdb_h=yes \
           ac_cv_header_netinet_in_h=yes \
