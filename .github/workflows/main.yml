@@ -168,7 +168,7 @@ jobs:
         INSTALL_PATH=$(pwd)/openssl-mingw
         mkdir -p "$INSTALL_PATH"
         wget -q -O- https://github.com/openssl/openssl/releases/download/openssl-3.6.2/openssl-3.6.2.tar.gz | tar xz
-        cd openssl-* || exit
+        cd openssl-3.6.2 || exit
         DISABLED_FEATURES=(
           no-quic no-err no-dso no-engine no-async no-autoalginit
           no-dtls no-sctp no-ssl3 no-tls1 no-tls1_1
