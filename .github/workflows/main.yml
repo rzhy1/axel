@@ -46,12 +46,19 @@ jobs:
         echo "AR=x86_64-w64-mingw32-ar" >> $GITHUB_ENV
         echo "RANLIB=x86_64-w64-mingw32-ranlib" >> $GITHUB_ENV
         echo "STRIP=x86_64-w64-mingw32-strip" >> $GITHUB_ENV
+        # 创建假头文件目录
         mkdir -p fake-headers/netinet
         touch fake-headers/netinet/in_systm.h
         touch fake-headers/netinet/in.h
         touch fake-headers/netinet/ip.h
+        touch fake-headers/netinet/if_ether.h
         mkdir -p fake-headers/arpa
         touch fake-headers/arpa/inet.h
+        mkdir -p fake-headers/net
+        touch fake-headers/net/if.h
+        touch fake-headers/net/if_arp.h
+        mkdir -p fake-headers/linux
+        touch fake-headers/linux/if_ether.h
         echo "CFLAGS=-O2 -static -D_WIN32_WINNT=0x0600 -DO_NONBLOCK=0x4000 -I$(pwd)/fake-headers" >> $GITHUB_ENV
         echo "LDFLAGS=-static -static-libgcc -static-libstdc++" >> $GITHUB_ENV
 
@@ -73,6 +80,10 @@ jobs:
           ac_cv_header_netinet_in_h=yes \
           ac_cv_header_netinet_in_systm_h=yes \
           ac_cv_header_netinet_ip_h=yes \
+          ac_cv_header_netinet_if_ether_h=yes \
+          ac_cv_header_net_if_h=yes \
+          ac_cv_header_net_if_arp_h=yes \
+          ac_cv_header_linux_if_ether_h=yes \
           ac_cv_header_sys_socket_h=yes \
           ac_cv_header_sys_time_h=yes \
           ac_cv_header_sys_ioctl_h=yes \
