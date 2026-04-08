@@ -51,8 +51,8 @@ jobs:
     - name: Generate configure script
       run: |
         cd axel
-        mkdir -p m4 build-aux   # 创建缺失的目录
-        autoreconf -fi          # 不再跳过 autopoint
+        mkdir -p m4 build-aux
+        autoreconf -fi
 
     - name: Configure (Windows static)
       run: |
@@ -60,9 +60,9 @@ jobs:
         ./configure \
           --host=x86_64-w64-mingw32 \
           --disable-nls \
-          --disable-shared \
-          --enable-static \
-          --without-ssl
+          --without-ssl \
+          ac_cv_header_arpa_inet_h=yes \
+          LIBS="-lws2_32"
 
     - name: Build
       run: |
