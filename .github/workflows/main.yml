@@ -81,6 +81,16 @@ jobs:
 
         # 5. Remove any previous duplicate UINT64_C definition (if accidentally added)
         sed -i '/^#define UINT64_C(c) c ## ULL$/d' src/axel.h
+
+        # 6. Fix %jd format specifiers: replace with %lld and cast arguments to (long long)
+        sed -i 's|"File size: %s (%jd bytes)"|"File size: %s (%lld bytes)"|' src/axel.c
+        sed -i 's|"State file found: %jd bytes downloaded, %jd to go."|"State file found: %lld bytes downloaded, %lld to go."|' src/axel.c
+        sed -i 's|"REST %jd"|"REST %lld"|' src/conn.c
+
+        # Cast the corresponding arguments
+        sed -i '/axl_message.*File size/s/axl->size/(long long)axl->size/' src/axel.c
+        sed -i '/State file found/s/axl->bytes_done/(long long)axl->bytes_done/; /State file found/s/axl->start_byte/(long long)axl->start_byte/' src/axel.c
+        sed -i '/ftp_command.*REST/s/conn->currentbyte/(long long)conn->currentbyte/' src/conn.c
         EOF
 
         chmod +x fix-axel.sh
