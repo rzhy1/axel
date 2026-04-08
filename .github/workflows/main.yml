@@ -123,6 +123,8 @@ jobs:
         touch fake-headers/linux/if_ether.h
         mkdir -p fake-headers/sys
         touch fake-headers/sys/socket.h
+        # 新增 netdb.h 假头文件
+        touch fake-headers/netdb.h
         echo "CFLAGS=-O2 -static -D_WIN32_WINNT=0x0600 -DO_NONBLOCK=0x4000 -D__USE_MINGW_ANSI_STDIO=1 -I$(pwd)/fake-headers" >> $GITHUB_ENV
         echo "LDFLAGS=-static -static-libgcc -static-libstdc++" >> $GITHUB_ENV
 
