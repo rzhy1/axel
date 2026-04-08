@@ -49,6 +49,7 @@ jobs:
         mkdir -p fake-headers/netinet
         touch fake-headers/netinet/in_systm.h
         touch fake-headers/netinet/in.h
+        touch fake-headers/netinet/ip.h
         echo "CFLAGS=-O2 -static -D_WIN32_WINNT=0x0600 -DO_NONBLOCK=0x4000 -I$(pwd)/fake-headers" >> $GITHUB_ENV
         echo "LDFLAGS=-static -static-libgcc -static-libstdc++" >> $GITHUB_ENV
 
@@ -69,6 +70,7 @@ jobs:
           ac_cv_header_netdb_h=yes \
           ac_cv_header_netinet_in_h=yes \
           ac_cv_header_netinet_in_systm_h=yes \
+          ac_cv_header_netinet_ip_h=yes \
           ac_cv_header_sys_socket_h=yes \
           ac_cv_header_sys_time_h=yes \
           ac_cv_header_sys_ioctl_h=yes \
