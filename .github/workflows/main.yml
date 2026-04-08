@@ -40,31 +40,31 @@ jobs:
         cd axel
         git submodule update --init --recursive
 
-    - name: Create and run fix script
+    - name: Create and run comprehensive fix script
       run: |
         cd axel
         cat > fix-axel.sh << 'EOF'
         #!/bin/bash
         set -e
 
+        echo "Applying Windows compatibility fixes..."
+
         # ---------- src/axel.h modifications ----------
-        # 1. Insert MinGW compatibility block after #include <sys/time.h>
         sed -i '/^#include <sys\/time.h>/a \
         \
         /* Windows/MinGW compatibility */\
         #ifdef __MINGW32__\
         #include <stdint.h>\
         #include <ws2tcpip.h>\
+        #include <winsock2.h>\
         #define sa_family_t ADDRESS_FAMILY\
         #define AF_INET   2\
         #define AF_INET6  23\
         #define AF_UNSPEC 0\
         #endif' src/axel.h
 
-        # 2. Comment out #include <net/if.h>
         sed -i 's|^#include <net/if.h>|/* #include <net/if.h> */  /* Not needed on Windows */|' src/axel.h
 
-        # 3. Undefine min/max to avoid conflict with Windows headers
         sed -i '/^#include "search.h"/a \
         \
         /* Windows defines min/max, undefine to use Axel'\''s own */\
@@ -75,44 +75,43 @@ jobs:
         #undef max\
         #endif' src/axel.h
 
-        # 4. Add ssize_t typedef at the end of the file
         echo '' >> src/axel.h
         echo '/* Windows lacks ssize_t */' >> src/axel.h
         echo 'typedef long long ssize_t;' >> src/axel.h
-
-        # 5. Remove any previous duplicate UINT64_C definition
         sed -i '/^#define UINT64_C(c) c ## ULL$/d' src/axel.h
 
-        # ---------- src/axel.c and src/conn.c format fixes ----------
+        # ---------- Format specifier fixes ----------
         sed -i 's|"File size: %s (%jd bytes)"|"File size: %s (%lld bytes)"|' src/axel.c
         sed -i 's|"State file found: %jd bytes downloaded, %jd to go."|"State file found: %lld bytes downloaded, %lld to go."|' src/axel.c
         sed -i 's|"REST %jd"|"REST %lld"|' src/conn.c
-
         sed -i '/axl_message.*File size/s/axl->size/(long long)axl->size/' src/axel.c
         sed -i '/State file found/s/axl->bytes_done/(long long)axl->bytes_done/; /State file found/s/axl->start_byte/(long long)axl->start_byte/' src/axel.c
         sed -i '/ftp_command.*REST/s/conn->currentbyte/(long long)conn->currentbyte/' src/conn.c
 
-        # ---------- src/http.c Range fixes ----------
         sed -i 's|"Range: bytes=%jd-%jd"|"Range: bytes=%lld-%lld"|' src/http.c
         sed -i 's|"Range: bytes=%jd-"|"Range: bytes=%lld-"|' src/http.c
         sed -i '/http_addheader.*Range: bytes=%lld-%lld/s/conn->lastbyte, conn->currentbyte/(long long)conn->lastbyte, (long long)conn->currentbyte/' src/http.c
         sed -i '/http_addheader.*Range: bytes=%lld-/s/conn->currentbyte/(long long)conn->currentbyte/' src/http.c
 
-        # ---------- src/tcp.c Windows compatibility ----------
-        # Replace fcntl call with ioctlsocket for non-blocking mode
-        sed -i 's/fcntl(sock_fd, F_SETFL, O_NONBLOCK);/{\
+        # ---------- src/tcp.c: Replace fcntl with ioctlsocket ----------
+        # Replace all occurrences of fcntl for setting non-blocking
+        sed -i 's/fcntl(sock_fd, F_SETFL, O_NONBLOCK)/{\
         \tunsigned long mode = 1;\
         \tioctlsocket(sock_fd, FIONBIO, \&mode);\
         }/g' src/tcp.c
+        sed -i 's/fcntl(sock_fd, F_SETFL, 0)/{\
+        \tunsigned long mode = 0;\
+        \tioctlsocket(sock_fd, FIONBIO, \&mode);\
+        }/g' src/tcp.c
 
-        # Change timeout variable to DWORD (milliseconds)
+        # Replace timeout struct timeval with DWORD
         sed -i '/struct timeval tout;/c\\tDWORD tout = DEFAULT_IO_TIMEOUT * 1000;' src/tcp.c
 
-        # Adjust setsockopt calls for Windows
-        sed -i 's|setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, &tout, sizeof(tout));|setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)\&tout, sizeof(tout));|' src/tcp.c
-        sed -i 's|setsockopt(sock_fd, SOL_SOCKET, SO_SNDTIMEO, &tout, sizeof(tout));|setsockopt(sock_fd, SOL_SOCKET, SO_SNDTIMEO, (const char *)\&tout, sizeof(tout));|' src/tcp.c
+        # Cast setsockopt arguments
+        sed -i 's|setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, &tout, sizeof(tout))|setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)\&tout, sizeof(tout))|' src/tcp.c
+        sed -i 's|setsockopt(sock_fd, SOL_SOCKET, SO_SNDTIMEO, &tout, sizeof(tout))|setsockopt(sock_fd, SOL_SOCKET, SO_SNDTIMEO, (const char *)\&tout, sizeof(tout))|' src/tcp.c
 
-        # Disable get_if_ip (interface binding) - not critical
+        # Disable get_if_ip function entirely (return -1)
         sed -i '/^int get_if_ip(/,/^}$/c\
         int get_if_ip(char *iface, struct sockaddr *sa)\
         {\
@@ -121,14 +120,14 @@ jobs:
         \treturn -1;\
         }' src/tcp.c
 
-        # ---------- src/text.c terminal width ----------
+        # ---------- src/text.c: Disable terminal width detection ----------
         sed -i '/^int get_term_width(/,/^}$/c\
         int get_term_width(void)\
         {\
         \treturn 80;\
         }' src/text.c
 
-        echo "All patches applied successfully."
+        echo "All fixes applied."
         EOF
 
         chmod +x fix-axel.sh
