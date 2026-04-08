@@ -40,40 +40,51 @@ jobs:
         cd axel
         git submodule update --init --recursive
 
-    - name: Apply Windows compatibility fixes to axel.h
+    - name: Create and run fix script for axel.h
       run: |
-        cd axel/src
-        # 1. 在 #include <sys/time.h> 之后插入 MinGW 兼容代码块
+        cd axel
+        cat > fix-axel.sh << 'EOF'
+        #!/bin/bash
+        # Fix src/axel.h for MinGW cross-compilation
+
+        # 1. Insert MinGW compatibility block after #include <sys/time.h>
         sed -i '/^#include <sys\/time.h>/a \
-/* Windows/MinGW compatibility */\
-#ifdef __MINGW32__\
-#include <stdint.h>\
-#include <ws2tcpip.h>\
-#define sa_family_t ADDRESS_FAMILY\
-#define AF_INET   2\
-#define AF_INET6  23\
-#define AF_UNSPEC 0\
-#endif' axel.h
-        
-        # 2. 注释掉 #include <net/if.h>
-        sed -i 's/^#include <net\/if.h>/\/\* #include <net\/if.h> \*\/  \/* Not needed on Windows *\//' axel.h
-        
-        # 3. 在 #include "search.h" 之后插入 min/max 的 undef
+        \
+        /* Windows/MinGW compatibility */\
+        #ifdef __MINGW32__\
+        #include <stdint.h>\
+        #include <ws2tcpip.h>\
+        #define sa_family_t ADDRESS_FAMILY\
+        #define AF_INET   2\
+        #define AF_INET6  23\
+        #define AF_UNSPEC 0\
+        #endif' src/axel.h
+
+        # 2. Comment out #include <net/if.h> (not needed on Windows)
+        sed -i 's|^#include <net/if.h>|/* #include <net/if.h> */  /* Not needed on Windows */|' src/axel.h
+
+        # 3. Undefine min/max to avoid conflict with Windows headers
         sed -i '/^#include "search.h"/a \
-\
-/* Windows defines min/max, undefine to use Axel'"'"'s own */\
-#ifdef min\
-#undef min\
-#endif\
-#ifdef max\
-#undef max\
-#endif' axel.h
-        
-        # 4. 在 ssize_t axel_rand64 声明之前添加 ssize_t 类型定义
-        #    先找到那一行，然后在该行之前插入
-        sed -i '/^ssize_t axel_rand64/i \
-/* Windows lacks ssize_t */\
-typedef long long ssize_t;' axel.h
+        \
+        /* Windows defines min/max, undefine to use Axel'\''s own */\
+        #ifdef min\
+        #undef min\
+        #endif\
+        #ifdef max\
+        #undef max\
+        #endif' src/axel.h
+
+        # 4. Add ssize_t typedef at the end of the file
+        echo '' >> src/axel.h
+        echo '/* Windows lacks ssize_t */' >> src/axel.h
+        echo 'typedef long long ssize_t;' >> src/axel.h
+
+        # 5. Remove any previous duplicate UINT64_C definition (if accidentally added)
+        sed -i '/^#define UINT64_C(c) c ## ULL$/d' src/axel.h
+        EOF
+
+        chmod +x fix-axel.sh
+        ./fix-axel.sh
 
     - name: Prepare build environment
       run: |
