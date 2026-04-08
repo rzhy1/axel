@@ -40,18 +40,16 @@ jobs:
         cd axel
         git submodule update --init --recursive
 
-    - name: Create patch for Windows compatibility
+    - name: Create and apply Windows compatibility patch
       run: |
         cd axel
-        cat > windows-fixes.patch << 'EOF'
-        diff --git a/src/axel.h b/src/axel.h
-        index 0000000..0000000 100644
+        cat > windows.patch << 'EOF'
         --- a/src/axel.h
         +++ b/src/axel.h
-        @@ -50,6 +50,17 @@
-         #include <sys/types.h>
-         #include <regex.h>
-         
+        @@ -59,10 +59,21 @@
+         #include <stdbool.h>
+         #include <sys/stat.h>
+         #include <sys/time.h>
         +/* Windows/MinGW compatibility */
         +#ifdef __MINGW32__
         +#include <stdint.h>
@@ -63,21 +61,27 @@ jobs:
         +#define UINT64_C(c) c ## ULL
         +#endif
         +
-         #ifdef ENABLE_NLS
-         # include <libintl.h>
-         # define _(x) gettext(x)
-        @@ -145,6 +156,9 @@ void axel_message(axel_t *, const char *, ...);
+         #include <netinet/in_systm.h>
+         #include <netinet/in.h>
+         #include <netinet/ip.h>
+         #include <arpa/inet.h>
+        -#include <net/if.h>
+        +/* #include <net/if.h> */  /* Not needed on Windows */
+         #include <pthread.h>
+         #include "compat-android.h"
+         #include "compat-bsd.h"
+        @@ -145,6 +156,9 @@
          int axel_http_get(axel_t *axel, conn_t *conn);
          int axel_ftp_get(axel_t *axel, conn_t *conn);
          
-        +/* Windows lacks ssize_t, provide it */
+        +/* Windows lacks ssize_t */
         +typedef long long ssize_t;
         +
          ssize_t axel_rand64(uint64_t *);
          
          /* Abort helpers */
         EOF
-        patch -p1 < windows-fixes.patch
+        patch -p1 < windows.patch
 
     - name: Prepare build environment
       run: |
