@@ -133,30 +133,22 @@ jobs:
         }' src/random.c
 
         # ---------- WinSock initialization and error handling ----------
-        # Add wsa_strerror function to tcp.c before use
-        sed -i '/^#include "tcp.h"/a \
-        \
-        /* Windows error string helper */\
-        #ifdef __MINGW32__\
-        static const char *wsa_strerror(int err) {\
-        \tstatic char buf[256];\
-        \tFormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,\
-        \t               NULL, err, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),\
-        \t               buf, sizeof(buf), NULL);\
-        \treturn buf;\
-        }\
-        #endif' src/tcp.c
-
-        # Replace strerror(errno) with wsa_strerror(WSAGetLastError())
-        sed -i 's/strerror(errno)/wsa_strerror(WSAGetLastError())/g' src/tcp.c
-
-        # Add WSAStartup in main() of axel.c
-        sed -i '/^int main(/,/^{/ {
+        # Insert WSAStartup in axel_new (src/axel.c)
+        sed -i '/^axel_t \*axel_new(/,/^{/ {
           n
           i \
         \tWSADATA wsaData;\
-        \tWSAStartup(MAKEWORD(2, 2), \&wsaData);
+        \tstatic int wsa_init = 0;\
+        \tif (!wsa_init) {\
+        \t\tif (WSAStartup(MAKEWORD(2, 2), \&wsaData) != 0) {\
+        \t\t\treturn NULL;\
+        \t\t}\
+        \t\twsa_init = 1;\
+        \t}
         }' src/axel.c
+
+        # Replace strerror(errno) with gai_strerror(WSAGetLastError())
+        sed -i 's/strerror(errno)/gai_strerror(WSAGetLastError())/g' src/tcp.c
 
         echo "All fixes applied."
         EOF
