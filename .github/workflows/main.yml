@@ -133,36 +133,30 @@ jobs:
         }' src/random.c
 
         # ---------- WinSock initialization and error handling ----------
-        # Insert WSAStartup in axel_new (src/axel.c)
-        sed -i '/^axel_t \*axel_new(/,/^{/ {
+        # Add wsa_strerror function to tcp.c before use
+        sed -i '/^#include "tcp.h"/a \
+        \
+        /* Windows error string helper */\
+        #ifdef __MINGW32__\
+        static const char *wsa_strerror(int err) {\
+        \tstatic char buf[256];\
+        \tFormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,\
+        \t               NULL, err, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),\
+        \t               buf, sizeof(buf), NULL);\
+        \treturn buf;\
+        }\
+        #endif' src/tcp.c
+
+        # Replace strerror(errno) with wsa_strerror(WSAGetLastError())
+        sed -i 's/strerror(errno)/wsa_strerror(WSAGetLastError())/g' src/tcp.c
+
+        # Add WSAStartup in main() of axel.c
+        sed -i '/^int main(/,/^{/ {
           n
           i \
         \tWSADATA wsaData;\
-        \tstatic int wsa_init = 0;\
-        \tif (!wsa_init) {\
-        \t\tif (WSAStartup(MAKEWORD(2, 2), \&wsaData) != 0) {\
-        \t\t\treturn NULL;\
-        \t\t}\
-        \t\twsa_init = 1;\
-        \t}
+        \tWSAStartup(MAKEWORD(2, 2), \&wsaData);
         }' src/axel.c
-
-        # Replace strerror(errno) with Windows error string in tcp.c
-        sed -i 's/strerror(errno)/wsa_strerror(WSAGetLastError())/g' src/tcp.c
-
-        # Add helper function wsa_strerror if not present
-        if ! grep -q "wsa_strerror" src/tcp.c; then
-          cat >> src/tcp.c << 'EOFWSA'
-
-        static const char *wsa_strerror(int err) {
-            static char buf[256];
-            FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
-                           NULL, err, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-                           buf, sizeof(buf), NULL);
-            return buf;
-        }
-        EOFWSA
-        fi
 
         echo "All fixes applied."
         EOF
