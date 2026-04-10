@@ -49,7 +49,7 @@ jobs:
         
         echo "Applying Windows compatibility fixes..."
         
-        # ---------- src/axel.h modifications ----------
+        # ---------- src/axel.h: 添加 Windows 支持 ----------
         sed -i '/^#include <sys\/time.h>/a \
         \
         /* Windows/MinGW compatibility */\
@@ -77,10 +77,11 @@ jobs:
         
         echo '' >> src/axel.h
         echo '/* Windows lacks ssize_t */' >> src/axel.h
+        echo '#ifdef __MINGW32__' >> src/axel.h
         echo 'typedef long long ssize_t;' >> src/axel.h
-        sed -i '/^#define UINT64_C(c) c ## ULL$/d' src/axel.h
+        echo '#endif' >> src/axel.h
         
-        # ---------- Format specifier fixes ----------
+        # ---------- 格式化修正 ----------
         sed -i 's|"File size: %s (%jd bytes)"|"File size: %s (%lld bytes)"|' src/axel.c
         sed -i 's|"State file found: %jd bytes downloaded, %jd to go."|"State file found: %lld bytes downloaded, %lld to go."|' src/axel.c
         sed -i 's|"REST %jd"|"REST %lld"|' src/conn.c
@@ -93,38 +94,126 @@ jobs:
         sed -i '/http_addheader.*Range: bytes=%lld-%lld/s/conn->lastbyte, conn->currentbyte/(long long)conn->lastbyte, (long long)conn->currentbyte/' src/http.c
         sed -i '/http_addheader.*Range: bytes=%lld-/s/conn->currentbyte/(long long)conn->currentbyte/' src/http.c
         
-        # ---------- src/tcp.c: Winsock init, error handling, ioctlsocket ----------
-        # 1. 在 tcp_connect 函数开头添加 Winsock 初始化
-        sed -i '/^tcp_connect(tcp_t \*tcp, char \*hostname, int port, int secure, char \*local_if,$/,/^{/ {
-          /^{/ a\
+        # ---------- 创建 Windows 网络 I/O 包装头文件 ----------
+        echo "Creating win32_net.h wrapper..."
+        cat > src/win32_net.h << 'HEADER'
+        #ifndef WIN32_NET_H
+        #define WIN32_NET_H
+        
+        #ifdef __MINGW32__
+        #include <winsock2.h>
+        #include <errno.h>
+        
+        /* Winsock 初始化（只执行一次） */
+        static inline void winsock_init_once(void) {
+            static int init = 0;
+            if (!init) {
+                WSADATA wsaData;
+                if (WSAStartup(MAKEWORD(2,2), &wsaData) == 0)
+                    init = 1;
+            }
+        }
+        
+        /* Windows recv 包装，映射错误码到 errno */
+        static inline int win_read(int fd, void *buf, size_t len) {
+            winsock_init_once();
+            int ret = recv(fd, (char*)buf, (int)len, 0);
+            if (ret == SOCKET_ERROR) {
+                int err = WSAGetLastError();
+                if (err == WSAEWOULDBLOCK) errno = EAGAIN;
+                else errno = err;
+                return -1;
+            }
+            return ret;
+        }
+        
+        /* Windows send 包装，映射错误码到 errno */
+        static inline int win_write(int fd, const void *buf, size_t len) {
+            winsock_init_once();
+            int ret = send(fd, (const char*)buf, (int)len, 0);
+            if (ret == SOCKET_ERROR) {
+                int err = WSAGetLastError();
+                if (err == WSAEWOULDBLOCK) errno = EAGAIN;
+                else errno = err;
+                return -1;
+            }
+            return ret;
+        }
+        
+        /* Windows connect 包装，处理非阻塞状态 */
+        static inline int win_connect(int fd, const struct sockaddr *name, int namelen) {
+            winsock_init_once();
+            int ret = connect(fd, name, namelen);
+            if (ret == SOCKET_ERROR) {
+                int err = WSAGetLastError();
+                if (err == WSAEWOULDBLOCK || err == WSAEINPROGRESS || err == WSAEALREADY) {
+                    errno = EINPROGRESS;
+                } else if (err == WSAEISCONN) {
+                    return 0;
+                } else {
+                    errno = err;
+                }
+                return -1;
+            }
+            return ret;
+        }
+        
+        /* Windows closesocket 包装 */
+        static inline int win_close(int fd) {
+            return closesocket(fd);
+        }
+        
+        /* 替换宏：网络相关函数使用 Winsock 版本 */
+        #define read(fd, buf, len)   win_read((fd), (buf), (len))
+        #define write(fd, buf, len)  win_write((fd), (buf), (len))
+        #define connect(fd, name, namelen) win_connect((fd), (name), (namelen))
+        #define close(fd)            win_close(fd)
+        
+        #endif /* __MINGW32__ */
+        #endif /* WIN32_NET_H */
+        HEADER
+        
+        # ---------- 将包装头文件注入网络源文件 ----------
+        echo "Injecting win32_net.h into network source files..."
+        for f in src/tcp.c src/conn.c src/http.c src/ftp.c; do
+            if [ -f "$f" ]; then
+                sed -i '/#include "axel.h"/a #include "win32_net.h"' "$f"
+            fi
+        done
+        
+        # ---------- 修正 tcp_error 以输出 Winsock 错误码 ----------
+        sed -i '/^inline static void$/,/^}$/c\
         #ifdef __MINGW32__\
-        \tstatic int wsa_init = 0;\
-        \tif (!wsa_init) {\
-        \t\tWSADATA wsaData;\
-        \t\tif (WSAStartup(MAKEWORD(2,2), &wsaData) == 0) {\
-        \t\t\twsa_init = 1;\
-        \t\t}\
-        \t}\
-        #endif
-        }' src/tcp.c
+        static void tcp_error(char *hostname, int port, const char *reason)\
+        {\
+        \tint err = WSAGetLastError();\
+        \tfprintf(stderr, "Unable to connect to server %s:%i: Winsock error %d\\n",\
+        \t\thostname, port, err);\
+        }\
+        #else\
+        inline static void\
+        tcp_error(char *hostname, int port, const char *reason)\
+        {\
+        \tfprintf(stderr, _("Unable to connect to server %s:%i: %s\\n"),\
+        \t\thostname, port, reason);\
+        }\
+        #endif' src/tcp.c
         
-        # 2. 完全重写 tcp_error 函数，Windows 下输出 Winsock 错误码
-        perl -i -0777 -pe 's/^inline static void\s*\ntcp_error\(.*?\)\s*\{.*?^\}/#ifdef __MINGW32__\nstatic void tcp_error(char *hostname, int port, const char *reason)\n{\n\tint err = WSAGetLastError();\n\tfprintf(stderr, "Unable to connect to server %s:%i: Winsock error %d\\n",\n\t\thostname, port, err);\n}\n#else\ninline static void\ntcp_error(char *hostname, int port, const char *reason)\n{\n\tfprintf(stderr, _("Unable to connect to server %s:%i: %s\\n"),\n\t\thostname, port, reason);\n}\n#endif/ms' src/tcp.c
+        # ---------- 移除 fcntl 非阻塞设置（包装器已处理错误码映射）----------
+        # 注释掉设置非阻塞的 fcntl 行
+        sed -i 's/^\t\t\tfcntl(sock_fd, F_SETFL, O_NONBLOCK);$/\/\/ fcntl(F_SETFL, O_NONBLOCK) not needed on Windows/' src/tcp.c
+        # 注释掉恢复阻塞的 fcntl 行
+        sed -i 's/^\tfcntl(sock_fd, F_SETFL, 0);$/\/\/ fcntl(F_SETFL, 0) not needed on Windows/' src/tcp.c
         
-        # 3. 替换设置非阻塞的 fcntl 为 ioctlsocket (在 else if (io_timeout) 块内)
-        perl -i -0777 -pe 's/(\s+else if \(io_timeout\) \{\s+)\/\* Set O_NONBLOCK.*?\*\/\s+fcntl\(sock_fd, F_SETFL, O_NONBLOCK\);/$1#ifdef __MINGW32__\n\t\t\tunsigned long mode = 1;\n\t\t\tioctlsocket(sock_fd, FIONBIO, \&mode);\n#else\n\t\t\tfcntl(sock_fd, F_SETFL, O_NONBLOCK);\n#endif/gs' src/tcp.c
+        # Windows 下 setsockopt 超时使用 DWORD
+        sed -i '/\/\* Set I\/O timeout \*\//,/;/ s/struct timeval tout = { \.tv_sec  = io_timeout };/#ifdef __MINGW32__\n\tDWORD tout = io_timeout * 1000;\n#else\n\tstruct timeval tout = { .tv_sec = io_timeout };\n#endif/' src/tcp.c
         
-        # 4. 替换恢复阻塞的 fcntl 为 ioctlsocket
-        perl -i -0777 -pe 's/(\s+)fcntl\(sock_fd, F_SETFL, 0\);/$1#ifdef __MINGW32__\n$1\tunsigned long mode = 0;\n$1\tioctlsocket(sock_fd, FIONBIO, \&mode);\n$1#else\n$1fcntl(sock_fd, F_SETFL, 0);\n$1#endif/gs' src/tcp.c
+        sed -i 's|setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, &tout, sizeof(tout))|#ifdef __MINGW32__\n\tsetsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)\&tout, sizeof(tout));\n#else\n\tsetsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, \&tout, sizeof(tout));\n#endif|' src/tcp.c
         
-        # 5. 替换 setsockopt 前的 tout 定义
-        sed -i '/\/\* Set I\/O timeout \*\//,/;/ s/struct timeval tout = { \.tv_sec  = io_timeout };/DWORD tout = io_timeout * 1000;/' src/tcp.c
+        sed -i 's|setsockopt(sock_fd, SOL_SOCKET, SO_SNDTIMEO, &tout, sizeof(tout))|#ifdef __MINGW32__\n\tsetsockopt(sock_fd, SOL_SOCKET, SO_SNDTIMEO, (const char *)\&tout, sizeof(tout));\n#else\n\tsetsockopt(sock_fd, SOL_SOCKET, SO_SNDTIMEO, \&tout, sizeof(tout));\n#endif|' src/tcp.c
         
-        # 6. 调整 setsockopt 调用以兼容 DWORD
-        sed -i 's|setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, &tout, sizeof(tout))|setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)\&tout, sizeof(tout))|' src/tcp.c
-        sed -i 's|setsockopt(sock_fd, SOL_SOCKET, SO_SNDTIMEO, &tout, sizeof(tout))|setsockopt(sock_fd, SOL_SOCKET, SO_SNDTIMEO, (const char *)\&tout, sizeof(tout))|' src/tcp.c
-        
-        # 7. 禁用 get_if_ip
+        # ---------- 其他必要修正 ----------
+        # 禁用 get_if_ip
         sed -i '/^get_if_ip(/,/^}/c\
         get_if_ip(char *dst, size_t len, const char *iface)\
         {\
@@ -134,14 +223,14 @@ jobs:
         \treturn -1;\
         }' src/tcp.c
         
-        # ---------- src/text.c: 固定终端宽度 ----------
+        # 固定终端宽度
         sed -i '/^get_term_width(/,/^}/c\
         get_term_width(void)\
         {\
         \treturn 80;\
         }' src/text.c
         
-        # ---------- src/random.c: 禁用 /dev/random ----------
+        # 禁用 /dev/random
         sed -i '/^axel_rnd_init(/,/^}/c\
         axel_rnd_init(void)\
         {\
