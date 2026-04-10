@@ -332,6 +332,7 @@ jobs:
           ac_cv_header_sys_socket_h=yes \
           ac_cv_func_nanosleep=yes \
           ac_cv_func_gettimeofday=yes \
+          ac_cv_decl_O_NONBLOCK=yes \
           LIBS="-lws2_32 -lcrypt32 -ladvapi32 -lgdi32 -lbcrypt"
 
     - name: Build
