@@ -45,9 +45,28 @@ jobs:
       run: |
         cd axel
         cat > apply_fixes.py << 'PYEOF'
-        import re
         import os
-        import stat
+
+        def replace_c_function_safe(content, func_name, ret_val):
+            targets = [
+                f"static int {func_name}(void)",
+                f"int {func_name}(void)",
+                f"void {func_name}(void)"
+            ]
+            for sig in targets:
+                idx = content.find(sig)
+                if idx == -1: continue
+                brace_idx = content.find('{', idx)
+                if brace_idx == -1: continue
+                depth = 0
+                for i in range(brace_idx, len(content)):
+                    if content[i] == '{': depth += 1
+                    elif content[i] == '}':
+                        depth -= 1
+                        if depth == 0:
+                            new_body = f" {{ return {ret_val}; }} "
+                            return content[:brace_idx] + new_body + content[i+1:]
+            return content
 
         # 1. 修复 src/axel.h
         with open("src/axel.h", "r") as f:
@@ -167,76 +186,36 @@ jobs:
             with open(fname, "r") as f: c = f.read()
             if '#include "win32_net.h"' not in c:
                 c = c.replace('#include "axel.h"', '#include "axel.h"\n#include "win32_net.h"')
-            c = re.sub(r'\bread\s*\(', 'WIN32_NET_READ(', c)
-            c = re.sub(r'\bwrite\s*\(', 'WIN32_NET_WRITE(', c)
-            c = re.sub(r'\bconnect\s*\(', 'WIN32_NET_CONNECT(', c)
-            c = re.sub(r'\bclose\s*\(', 'WIN32_NET_CLOSE(', c)
+            c = c.replace("read(", "WIN32_NET_READ(").replace("write(", "WIN32_NET_WRITE(").replace("connect(", "WIN32_NET_CONNECT(").replace("close(", "WIN32_NET_CLOSE(")
             with open(fname, "w") as f: f.write(c)
 
         # 4. 修复格式字符串 %jd -> %lld
         for fname in ["src/axel.c", "src/http.c", "src/conn.c"]:
             if not os.path.exists(fname): continue
             with open(fname, "r") as f: c = f.read()
-            c = re.sub(r'%jd', '%lld', c)
+            c = c.replace("%jd", "%lld")
             with open(fname, "w") as f: f.write(c)
 
         # 5. 修复 tcp.c 平台差异
         with open("src/tcp.c", "r") as f: c = f.read()
-        c = re.sub(r'\s*fcntl\s*\(.*F_SETFL.*\);', '', c)
-        c = re.sub(
-            r'struct timeval tout.*?setsockopt\(.*SO_RCVTIMEO.*?\);.*?setsockopt\(.*SO_SNDTIMEO.*?\);',
-            """#ifdef __MINGW32__
-                if (io_timeout > 0) {
-                    win_set_timeout(sock_fd, SO_RCVTIMEO, io_timeout);
-                    win_set_timeout(sock_fd, SO_SNDTIMEO, io_timeout);
-                }
-            #else
-                if (io_timeout > 0) {
-                    struct timeval tout = { .tv_sec = io_timeout, .tv_usec = 0 };
-                    setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, &tout, sizeof(tout));
-                    setsockopt(sock_fd, SOL_SOCKET, SO_SNDTIMEO, &tout, sizeof(tout));
-                }
-            #endif""",
-            c, flags=re.DOTALL
+        c = c.replace("fcntl(sock_fd, F_SETFL, O_NONBLOCK);", "").replace("fcntl(sock_fd, F_SETFL, 0);", "")
+        c = c.replace(
+            "struct timeval tout = { .tv_sec  = io_timeout };",
+            "#ifdef __MINGW32__\n    DWORD tout = io_timeout * 1000;\n#else\n    struct timeval tout = { .tv_sec = io_timeout, .tv_usec = 0 };\n#endif"
         )
-        c = re.sub(r'\nint\s+get_if_ip\s*\(.*?\)\s*{.*?}\s*', '', c, flags=re.DOTALL)
-        c = re.sub(
-            r'inline static void\s+tcp_error\s*\(.*?\)\s*{.*?}',
-            """#ifdef __MINGW32__
-            static void tcp_error(char *hostname, int port, const char *reason) {
-                int err = WSAGetLastError();
-                fprintf(stderr, "Unable to connect to server %s:%i: Winsock error %d (%s)\\n", hostname, port, err, reason);
-            }
-            #else
-            inline static void tcp_error(char *hostname, int port, const char *reason) {
-                fprintf(stderr, _("Unable to connect to server %s:%i: %s\\n"), hostname, port, reason);
-            }
-            #endif""",
-            c, flags=re.DOTALL
-        )
+        c = c.replace("setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, &tout, sizeof(tout));", 
+                      "setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tout, sizeof(tout));")
+        c = c.replace("setsockopt(sock_fd, SOL_SOCKET, SO_SNDTIMEO, &tout, sizeof(tout));", 
+                      "setsockopt(sock_fd, SOL_SOCKET, SO_SNDTIMEO, (const char *)&tout, sizeof(tout));")
+        # 移除 get_if_ip 函数体（保留声明避免链接错误，或注释掉）
+        c = c.replace("int\nget_if_ip", "/* int\nget_if_ip")
         with open("src/tcp.c", "w") as f: f.write(c)
 
-        # 6. 安全替换 Stub 函数（使用括号匹配，绝不破坏原文件结构）
-        def safe_replace_func(content, func_name, ret_val):
-            for prefix in ["static int ", "int "]:
-                start = content.find(f"{prefix}{func_name}(void)")
-                if start == -1: continue
-                brace = content.find("{", start)
-                if brace == -1: continue
-                depth = 0
-                for i in range(brace, len(content)):
-                    if content[i] == "{": depth += 1
-                    elif content[i] == "}":
-                        depth -= 1
-                        if depth == 0:
-                            new_body = f"static int {func_name}(void) {{ return {ret_val}; }}"
-                            return content[:start] + new_body + content[i+1:]
-            return content
-
+        # 6. 安全替换 Stub 函数（使用花括号计数，绝不破坏 #ifdef 结构）
         for fname, func, val in [("src/text.c", "get_term_width", "80"), ("src/random.c", "axel_rnd_init", "0")]:
             if os.path.exists(fname):
                 with open(fname, "r") as f: c = f.read()
-                c = safe_replace_func(c, func, val)
+                c = replace_c_function_safe(c, func, val)
                 with open(fname, "w") as f: f.write(c)
 
         # 7. 启用 CA 证书自动搜索
@@ -264,7 +243,8 @@ jobs:
         printf "#ifndef _FAKE_H\n#define _FAKE_H\n#include <winsock2.h>\n#endif\n" > fake-headers/arpa/inet.h
         touch fake-headers/net/if.h fake-headers/net/if_arp.h fake-headers/linux/if_ether.h
         printf "#ifndef _FAKE_H\n#define _FAKE_H\n#include <winsock2.h>\ntypedef int socklen_t;\n#endif\n" > fake-headers/sys/socket.h
-        printf "#ifndef _FAKE_H\n#define _FAKE_H\n#endif\n" > fake-headers/sys/ioctl.h fake-headers/sys/time.h fake-headers/netdb.h
+        printf "#ifndef _FAKE_H\n#define _FAKE_H\n#endif\n" > fake-headers/sys/ioctl.h fake-headers/sys/time.h
+        printf "#ifndef _FAKE_NETDB_H\n#define _FAKE_NETDB_H\n#include <winsock2.h>\n#include <ws2tcpip.h>\n#endif\n" > fake-headers/netdb.h
 
         echo "CFLAGS=-O2 -static -D__USE_MINGW_ANSI_STDIO=1 -DO_NONBLOCK=0x4000 -I$(pwd)/fake-headers -ffunction-sections -fdata-sections -Wno-error=format -Wno-error" >> $GITHUB_ENV
         echo "LDFLAGS=-static -static-libgcc -static-libstdc++ -Wl,--gc-sections" >> $GITHUB_ENV
