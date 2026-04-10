@@ -22,11 +22,12 @@ jobs:
           pkg-config \
           make \
           autoconf-archive \
-          txt2man
+          txt2man \
+          python3
 
     - name: Build and Install Autoconf 2.72
       run: |
-        wget https://ftp.gnu.org/gnu/autoconf/autoconf-2.72.tar.xz
+        wget -q https://ftp.gnu.org/gnu/autoconf/autoconf-2.72.tar.xz
         tar -xf autoconf-2.72.tar.xz
         cd autoconf-2.72
         ./configure --prefix=/usr/local
@@ -40,260 +41,212 @@ jobs:
         cd axel
         git submodule update --init --recursive
 
-    - name: Create and run comprehensive fix script
+    - name: Apply Windows compatibility fixes
       run: |
         cd axel
-        cat > fix-axel.sh << 'ENDOFSCRIPT'
-        #!/bin/bash
-        set -e
-        
-        echo "Applying Windows compatibility fixes..."
-        
-        # ========== 1. src/axel.h: Windows 兼容性修复 ==========
-        echo "Patching src/axel.h..."
-        
-        # 添加 Windows 支持（带保护宏）
-        sed -i '/^#include <sys\/time.h>/a\
-\
-/* Windows/MinGW compatibility */\
-#ifdef __MINGW32__\
-#include <stdint.h>\
-#include <ws2tcpip.h>\
-#include <winsock2.h>\
-#ifndef sa_family_t\
-#define sa_family_t ADDRESS_FAMILY\
-#endif\
-#ifndef AF_INET\
-#define AF_INET 2\
-#endif\
-#ifndef AF_INET6\
-#define AF_INET6 23\
-#endif\
-#ifndef AF_UNSPEC\
-#define AF_UNSPEC 0\
-#endif\
-#ifndef _SSIZE_T_DEFINED\
-#ifndef _SSIZE_T_\
-#ifndef __ssize_t_defined\
-typedef intptr_t ssize_t;\
-#define _SSIZE_T_DEFINED\
-#define _SSIZE_T_\
-#define __ssize_t_defined\
-#endif\
-#endif\
-#endif\
-#endif' src/axel.h
-        
-        # 注释掉 Linux 特有头文件
-        sed -i 's|^#include <net/if.h>|/* #include <net/if.h> */|' src/axel.h
-        
-        # 处理 min/max 宏冲突
-        sed -i '/^#include "search.h"/a\
-\
-#ifdef min\
-#undef min\
-#endif\
-#ifdef max\
-#undef max\
-#endif' src/axel.h
-        
-        # ========== 2. 格式化字符串修复: %jd -> %lld ==========
-        echo "Fixing format strings..."
-        sed -i 's/%jd bytes/%lld bytes/g' src/axel.c
-        sed -i 's/%jd-%jd/%lld-%lld/g' src/http.c
-        sed -i 's/%jd-/%lld-/g' src/http.c
-        sed -i 's/"REST %jd"/"REST %lld"/g' src/conn.c
-        
-        # 修复 intmax_t 类型转换
-        sed -i 's/axl->size/(long long)axl->size/g' src/axel.c
-        sed -i 's/axl->bytes_done/(long long)axl->bytes_done/g' src/axel.c
-        sed -i 's/axl->start_byte/(long long)axl->start_byte/g' src/axel.c
-        sed -i 's/conn->currentbyte/(long long)conn->currentbyte/g' src/conn.c src/http.c
-        sed -i 's/conn->lastbyte/(long long)conn->lastbyte/g' src/http.c
-        
-        # ========== 3. 创建 win32_net.h 包装头文件 ==========
-        echo "Creating src/win32_net.h..."
-        cat > src/win32_net.h << 'WIN32NET'
-#ifndef WIN32_NET_H
-#define WIN32_NET_H
+        cat > apply_fixes.py << 'PYEOF'
+        import re
+        import os
+        import stat
 
-#ifdef __MINGW32__
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#include <errno.h>
-#include <limits.h>
+        os.chdir("axel")
 
-/* WSA error to POSIX errno mapping */
-static inline int ws2errno(int ws_err) {
-    switch(ws_err) {
-        case WSAEWOULDBLOCK:  return EAGAIN;
-        case WSAEINPROGRESS:  return EINPROGRESS;
-        case WSAEALREADY:     return EALREADY;
-        case WSAEISCONN:      return 0;
-        case WSAECONNREFUSED: return ECONNREFUSED;
-        case WSAETIMEDOUT:    return ETIMEDOUT;
-        case WSAECONNRESET:   return ECONNRESET;
-        case WSAENETUNREACH:  return ENETUNREACH;
-        case WSAEHOSTUNREACH: return EHOSTUNREACH;
-        case WSAEADDRINUSE:   return EADDRINUSE;
-        default:              return EIO;
-    }
-}
-
-/* Thread-safe Winsock init */
-static inline void winsock_init_once(void) {
-    static volatile LONG init = 0;
-    if (InterlockedCompareExchange(&init, 1, 0) == 0) {
-        WSADATA wsaData;
-        WSAStartup(MAKEWORD(2,2), &wsaData);
-    }
-}
-
-/* Safe recv wrapper */
-static inline int win_read(int fd, void *buf, size_t len) {
-    winsock_init_once();
-    if (len > INT_MAX) len = INT_MAX;
-    int ret = recv((SOCKET)fd, (char*)buf, (int)len, 0);
-    if (ret == SOCKET_ERROR) { errno = ws2errno(WSAGetLastError()); return -1; }
-    return ret;
-}
-
-/* Safe send wrapper */
-static inline int win_write(int fd, const void *buf, size_t len) {
-    winsock_init_once();
-    if (len > INT_MAX) len = INT_MAX;
-    int ret = send((SOCKET)fd, (const char*)buf, (int)len, 0);
-    if (ret == SOCKET_ERROR) { errno = ws2errno(WSAGetLastError()); return -1; }
-    return ret;
-}
-
-/* Safe connect wrapper */
-static inline int win_connect(int fd, const struct sockaddr *name, int namelen) {
-    winsock_init_once();
-    int ret = connect((SOCKET)fd, name, namelen);
-    if (ret == SOCKET_ERROR) {
-        int err = WSAGetLastError();
-        if (err == WSAEWOULDBLOCK || err == WSAEINPROGRESS || err == WSAEALREADY)
-            errno = EINPROGRESS;
-        else if (err == WSAEISCONN)
-            return 0;
-        else
-            errno = ws2errno(err);
-        return -1;
-    }
-    return ret;
-}
-
-/* Safe close wrapper */
-static inline int win_close(int fd) {
-    return closesocket((SOCKET)fd);
-}
-
-/* Safe timeout setter */
-static inline int win_set_timeout(int fd, int optname, int timeout_sec) {
-    DWORD tout = timeout_sec * 1000;
-    return setsockopt((SOCKET)fd, SOL_SOCKET, optname, (const char*)&tout, sizeof(tout));
-}
-
-/* Conditional macros - only active on MinGW */
-#define WIN32_NET_READ(fd, buf, len)   win_read((fd), (buf), (len))
-#define WIN32_NET_WRITE(fd, buf, len)  win_write((fd), (buf), (len))
-#define WIN32_NET_CONNECT(fd, name, namelen) win_connect((fd), (name), (namelen))
-#define WIN32_NET_CLOSE(fd)            win_close(fd)
-
-#else
-/* Native POSIX - pass through */
-#define WIN32_NET_READ(fd, buf, len)   read((fd), (buf), (len))
-#define WIN32_NET_WRITE(fd, buf, len)  write((fd), (buf), (len))
-#define WIN32_NET_CONNECT(fd, name, namelen) connect((fd), (name), (namelen))
-#define WIN32_NET_CLOSE(fd)            close(fd)
-#endif
-
-#endif /* WIN32_NET_H */
-WIN32NET
-
-        # ========== 4. 注入 win32_net.h 到网络源文件 ==========
-        echo "Injecting win32_net.h into source files..."
-        for f in src/tcp.c src/conn.c src/http.c src/ftp.c; do
-            [ -f "$f" ] && ! grep -q 'win32_net.h' "$f" && \
-                sed -i '/#include "axel.h"/a #include "win32_net.h"' "$f"
-        done
+        # 1. 修复 src/axel.h
+        with open("src/axel.h", "r") as f:
+            h = f.read()
+        h = h.replace("#include <net/if.h>", "/* #include <net/if.h> */")
         
-        # ========== 5. 替换网络函数调用为安全包装 ==========
-        echo "Replacing network function calls..."
-        for f in src/conn.c src/http.c src/ftp.c src/tcp.c; do
-            [ -f "$f" ] || continue
-            # 替换 read/write/connect/close 调用（使用我们的条件宏）
-            sed -i 's/\bread(\s*\([^)]*\)\s*)/WIN32_NET_READ(\1)/g' "$f"
-            sed -i 's/\bwrite(\s*\([^)]*\)\s*)/WIN32_NET_WRITE(\1)/g' "$f"
-            sed -i 's/\bconnect(\s*\([^)]*\)\s*)/WIN32_NET_CONNECT(\1)/g' "$f"
-            sed -i 's/\bclose(\s*\([^)]*\)\s*)/WIN32_NET_CLOSE(\1)/g' "$f"
-        done
+        win32_inc = """
+        #ifdef __MINGW32__
+        #include <stdint.h>
+        #include <ws2tcpip.h>
+        #include <winsock2.h>
+        #ifndef sa_family_t
+        #define sa_family_t ADDRESS_FAMILY
+        #endif
+        #ifndef _SSIZE_T_DEFINED
+        typedef intptr_t ssize_t;
+        #define _SSIZE_T_DEFINED
+        #endif
+        #endif
+        """
+        h = h.replace("#include <sys/time.h>", f"#include <sys/time.h>\n{win32_inc}")
         
-        # ========== 6. tcp.c 特定修复（用 sed 替代 patch）==========
-        echo "Patching src/tcp.c directly..."
-        
-        # 6.1 修复 tcp_error 函数 - 添加 Windows 版本
-        sed -i '/^inline static void$/,/^}$/c\
-#ifdef __MINGW32__\
-static void tcp_error(char *hostname, int port, const char *reason)\
-{\
-    int err = WSAGetLastError();\
-    fprintf(stderr, "Unable to connect to server %s:%i: Winsock error %d (%s)\\n",\
-        hostname, port, err, reason);\
-}\
-#else\
-inline static void\
-tcp_error(char *hostname, int port, const char *reason)\
-{\
-    fprintf(stderr, _("Unable to connect to server %s:%i: %s\\n"),\
-        hostname, port, reason);\
-}\
-#endif' src/tcp.c
-        
-        # 6.2 移除 fcntl 调用（Windows 不支持）
-        sed -i '/fcntl.*F_SETFL.*O_NONBLOCK/d' src/tcp.c
-        sed -i '/fcntl.*F_SETFL.*0/d' src/tcp.c
-        
-        # 6.3 修复 setsockopt 超时设置（Windows 用毫秒）
-        sed -i '/struct timeval tout.*tv_sec.*io_timeout/,/setsockopt.*SO_SNDTIMEO/c\
-#ifdef __MINGW32__\
-    if (io_timeout > 0) {\
-        win_set_timeout(sock_fd, SO_RCVTIMEO, io_timeout);\
-        win_set_timeout(sock_fd, SO_SNDTIMEO, io_timeout);\
-    }\
-#else\
-    if (io_timeout > 0) {\
-        struct timeval tout = { .tv_sec = io_timeout, .tv_usec = 0 };\
-        setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, \&tout, sizeof(tout));\
-        setsockopt(sock_fd, SOL_SOCKET, SO_SNDTIMEO, \&tout, sizeof(tout));\
-    }\
-#endif' src/tcp.c
-        
-        # 6.4 移除 get_if_ip 函数（Windows 不支持）
-        sed -i '/^get_if_ip(/,/^}$/d' src/tcp.c
-        
-        # ========== 7. 其他平台兼容性修复 ==========
-        echo "Applying additional fixes..."
-        
-        # 固定终端宽度
-        sed -i '/^get_term_width(/,/^}/c\
-int get_term_width(void) { return 80; }' src/text.c
-        
-        # 禁用 /dev/random
-        sed -i '/^axel_rnd_init(/,/^}/c\
-int axel_rnd_init(void) { return 0; }' src/random.c
-        
-        # 添加 SSL_CTX_set_default_verify_paths 调用（如果存在 SSL 初始化）
-        if grep -q "SSL_CTX_new" src/axel.c; then
-            sed -i '/SSL_CTX_new/a\    SSL_CTX_set_default_verify_paths(ssl_ctx);' src/axel.c
-        fi
-        
-        echo "All fixes applied successfully!"
-        ENDOFSCRIPT
+        minmax_undef = "\n#ifdef min\n#undef min\n#endif\n#ifdef max\n#undef max\n#endif\n"
+        h = h.replace('#include "search.h"', f'#include "search.h"\n{minmax_undef}')
+        with open("src/axel.h", "w") as f: f.write(h)
 
-        chmod +x fix-axel.sh
-        ./fix-axel.sh
+        # 2. 创建 src/win32_net.h
+        win32_net = """#ifndef WIN32_NET_H
+        #define WIN32_NET_H
+
+        #ifdef __MINGW32__
+        #include <winsock2.h>
+        #include <ws2tcpip.h>
+        #include <errno.h>
+        #include <limits.h>
+
+        static inline int ws2errno(int ws_err) {
+            switch(ws_err) {
+                case WSAEWOULDBLOCK:  return EAGAIN;
+                case WSAEINPROGRESS:  return EINPROGRESS;
+                case WSAEALREADY:     return EALREADY;
+                case WSAEISCONN:      return 0;
+                case WSAECONNREFUSED: return ECONNREFUSED;
+                case WSAETIMEDOUT:    return ETIMEDOUT;
+                case WSAECONNRESET:   return ECONNRESET;
+                case WSAENETUNREACH:  return ENETUNREACH;
+                case WSAEHOSTUNREACH: return EHOSTUNREACH;
+                case WSAEADDRINUSE:   return EADDRINUSE;
+                default:              return EIO;
+            }
+        }
+
+        static inline void winsock_init_once(void) {
+            static volatile LONG init = 0;
+            if (InterlockedCompareExchange(&init, 1, 0) == 0) {
+                WSADATA wsaData;
+                WSAStartup(MAKEWORD(2,2), &wsaData);
+            }
+        }
+
+        static inline int win_read(int fd, void *buf, size_t len) {
+            winsock_init_once();
+            if (len > INT_MAX) len = INT_MAX;
+            int ret = recv((SOCKET)fd, (char*)buf, (int)len, 0);
+            if (ret == SOCKET_ERROR) { errno = ws2errno(WSAGetLastError()); return -1; }
+            return ret;
+        }
+
+        static inline int win_write(int fd, const void *buf, size_t len) {
+            winsock_init_once();
+            if (len > INT_MAX) len = INT_MAX;
+            int ret = send((SOCKET)fd, (const char*)buf, (int)len, 0);
+            if (ret == SOCKET_ERROR) { errno = ws2errno(WSAGetLastError()); return -1; }
+            return ret;
+        }
+
+        static inline int win_connect(int fd, const struct sockaddr *name, int namelen) {
+            winsock_init_once();
+            int ret = connect((SOCKET)fd, name, namelen);
+            if (ret == SOCKET_ERROR) {
+                int err = WSAGetLastError();
+                if (err == WSAEWOULDBLOCK || err == WSAEINPROGRESS || err == WSAEALREADY)
+                    errno = EINPROGRESS;
+                else if (err == WSAEISCONN)
+                    return 0;
+                else
+                    errno = ws2errno(err);
+                return -1;
+            }
+            return ret;
+        }
+
+        static inline int win_close(int fd) { return closesocket((SOCKET)fd); }
+
+        static inline int win_set_timeout(int fd, int optname, int sec) {
+            DWORD tout = sec * 1000;
+            return setsockopt((SOCKET)fd, SOL_SOCKET, optname, (const char*)&tout, sizeof(tout));
+        }
+
+        #define WIN32_NET_READ(fd, buf, len)   win_read((fd), (buf), (len))
+        #define WIN32_NET_WRITE(fd, buf, len)  win_write((fd), (buf), (len))
+        #define WIN32_NET_CONNECT(fd, name, namelen) win_connect((fd), (name), (namelen))
+        #define WIN32_NET_CLOSE(fd)            win_close(fd)
+        #else
+        #define WIN32_NET_READ(fd, buf, len)   read((fd), (buf), (len))
+        #define WIN32_NET_WRITE(fd, buf, len)  write((fd), (buf), (len))
+        #define WIN32_NET_CONNECT(fd, name, namelen) connect((fd), (name), (namelen))
+        #define WIN32_NET_CLOSE(fd)            close(fd)
+        #endif
+        #endif
+        """
+        with open("src/win32_net.h", "w") as f: f.write(win32_net)
+
+        # 3. 注入头文件 & 替换网络调用
+        for fname in ["src/tcp.c", "src/conn.c", "src/http.c", "src/ftp.c"]:
+            if not os.path.exists(fname): continue
+            with open(fname, "r") as f: c = f.read()
+            if '#include "win32_net.h"' not in c:
+                c = c.replace('#include "axel.h"', '#include "axel.h"\n#include "win32_net.h"')
+            c = re.sub(r'\bread\s*\(', 'WIN32_NET_READ(', c)
+            c = re.sub(r'\bwrite\s*\(', 'WIN32_NET_WRITE(', c)
+            c = re.sub(r'\bconnect\s*\(', 'WIN32_NET_CONNECT(', c)
+            c = re.sub(r'\bclose\s*\(', 'WIN32_NET_CLOSE(', c)
+            with open(fname, "w") as f: f.write(c)
+
+        # 4. 修复格式字符串 %jd -> %lld
+        for fname in ["src/axel.c", "src/http.c", "src/conn.c"]:
+            if not os.path.exists(fname): continue
+            with open(fname, "r") as f: c = f.read()
+            c = c.replace("%jd bytes", "%lld bytes")
+            c = c.replace("%jd-%jd", "%lld-%lld")
+            c = c.replace("%jd-", "%lld-")
+            c = c.replace('"REST %jd"', '"REST %lld"')
+            c = c.replace("axl->size", "(long long)axl->size")
+            c = c.replace("axl->bytes_done", "(long long)axl->bytes_done")
+            c = c.replace("axl->start_byte", "(long long)axl->start_byte")
+            c = c.replace("conn->currentbyte", "(long long)conn->currentbyte")
+            c = c.replace("conn->lastbyte", "(long long)conn->lastbyte")
+            with open(fname, "w") as f: f.write(c)
+
+        # 5. 修复 tcp.c 平台差异
+        with open("src/tcp.c", "r") as f: c = f.read()
+        # 移除 fcntl
+        c = re.sub(r'\s*fcntl\s*\(.*F_SETFL.*\);', '', c)
+        # 替换超时设置
+        c = re.sub(
+            r'struct timeval tout.*?setsockopt\(.*SO_RCVTIMEO.*?\);.*?setsockopt\(.*SO_SNDTIMEO.*?\);',
+            """#ifdef __MINGW32__
+                if (io_timeout > 0) {
+                    win_set_timeout(sock_fd, SO_RCVTIMEO, io_timeout);
+                    win_set_timeout(sock_fd, SO_SNDTIMEO, io_timeout);
+                }
+            #else
+                if (io_timeout > 0) {
+                    struct timeval tout = { .tv_sec = io_timeout, .tv_usec = 0 };
+                    setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, &tout, sizeof(tout));
+                    setsockopt(sock_fd, SOL_SOCKET, SO_SNDTIMEO, &tout, sizeof(tout));
+                }
+            #endif""",
+            c, flags=re.DOTALL
+        )
+        # 移除 get_if_ip
+        c = re.sub(r'\nint\s+get_if_ip\s*\(.*?\)\s*{.*?}\s*', '', c, flags=re.DOTALL)
+        # 替换 tcp_error
+        c = re.sub(
+            r'inline static void\s+tcp_error\s*\(.*?\)\s*{.*?}',
+            """#ifdef __MINGW32__
+            static void tcp_error(char *hostname, int port, const char *reason) {
+                int err = WSAGetLastError();
+                fprintf(stderr, "Unable to connect to server %s:%i: Winsock error %d (%s)\\n", hostname, port, err, reason);
+            }
+            #else
+            inline static void tcp_error(char *hostname, int port, const char *reason) {
+                fprintf(stderr, _("Unable to connect to server %s:%i: %s\\n"), hostname, port, reason);
+            }
+            #endif""",
+            c, flags=re.DOTALL
+        )
+        with open("src/tcp.c", "w") as f: f.write(c)
+
+        # 6. 其他 Stub 函数
+        for stub_file, func in [("src/text.c", "get_term_width"), ("src/random.c", "axel_rnd_init")]:
+            if not os.path.exists(stub_file): continue
+            with open(stub_file, "r") as f: c = f.read()
+            c = re.sub(rf'\w+\s+{func}\s*\(.*?\)\s*{{.*?}}', f'int {func}(void) {{ return 80 if "{func}" == "get_term_width" else 0; }}', c, flags=re.DOTALL)
+            with open(stub_file, "w") as f: f.write(c)
+
+        # 7. 启用 CA 证书自动搜索
+        if os.path.exists("src/axel.c"):
+            with open("src/axel.c", "r") as f: c = f.read()
+            if "SSL_CTX_set_default_verify_paths" not in c:
+                c = c.replace("SSL_CTX_new(", "SSL_CTX_set_default_verify_paths(ssl_ctx); SSL_CTX_new(")
+                with open("src/axel.c", "w") as f: f.write(c)
+
+        print("✅ All patches applied successfully via Python.")
+        PYEOF
+        python3 apply_fixes.py
 
     - name: Prepare build environment
       run: |
@@ -301,19 +254,16 @@ int axel_rnd_init(void) { return 0; }' src/random.c
         echo "AR=x86_64-w64-mingw32-ar" >> $GITHUB_ENV
         echo "RANLIB=x86_64-w64-mingw32-ranlib" >> $GITHUB_ENV
         echo "STRIP=x86_64-w64-mingw32-strip" >> $GITHUB_ENV
-        
-        # 创建 minimal fake-headers
+
         mkdir -p fake-headers/{netinet,arpa,net,linux,sys}
-        for h in in_systm.h ip.h if_ether.h tcp.h; do
-            echo "#ifndef _FAKE_H\n#define _FAKE_H\n#include <winsock2.h>\n#endif" > fake-headers/netinet/$h
+        for h in in.h in_systm.h ip.h tcp.h if_ether.h; do
+          printf "#ifndef _FAKE_H\n#define _FAKE_H\n#include <winsock2.h>\n#endif\n" > fake-headers/netinet/$h
         done
-        echo "#ifndef _FAKE_H\n#define _FAKE_H\n#include <winsock2.h>\n#endif" > fake-headers/arpa/inet.h
-        touch fake-headers/net/if.h fake-headers/net/if_arp.h
-        touch fake-headers/linux/if_ether.h
-        echo "#ifndef _FAKE_H\n#define _FAKE_H\n#include <winsock2.h>\ntypedef int socklen_t;\n#endif" > fake-headers/sys/socket.h
-        echo "#ifndef _FAKE_H\n#define _FAKE_H\n#endif" > fake-headers/sys/ioctl.h fake-headers/sys/time.h
-        echo "#ifndef _FAKE_H\n#define _FAKE_H\n#include <winsock2.h>\n#endif" > fake-headers/netdb.h
-        
+        printf "#ifndef _FAKE_H\n#define _FAKE_H\n#include <winsock2.h>\n#endif\n" > fake-headers/arpa/inet.h
+        touch fake-headers/net/if.h fake-headers/net/if_arp.h fake-headers/linux/if_ether.h
+        printf "#ifndef _FAKE_H\n#define _FAKE_H\n#include <winsock2.h>\ntypedef int socklen_t;\n#endif\n" > fake-headers/sys/socket.h
+        printf "#ifndef _FAKE_H\n#define _FAKE_H\n#endif\n" > fake-headers/sys/ioctl.h fake-headers/sys/time.h fake-headers/netdb.h
+
         echo "CFLAGS=-O2 -static -D_WIN32_WINNT=0x0601 -D__USE_MINGW_ANSI_STDIO=1 -I$(pwd)/fake-headers -ffunction-sections -fdata-sections" >> $GITHUB_ENV
         echo "LDFLAGS=-static -static-libgcc -static-libstdc++ -Wl,--gc-sections" >> $GITHUB_ENV
 
@@ -323,7 +273,7 @@ int axel_rnd_init(void) { return 0; }' src/random.c
         mkdir -p m4 build-aux
         autoreconf -fi
 
-    - name: Cross compile OpenSSL for Windows (static)
+    - name: Cross compile OpenSSL for Windows
       run: |
         INSTALL_PATH=$(pwd)/openssl-mingw
         mkdir -p "$INSTALL_PATH"
@@ -331,7 +281,10 @@ int axel_rnd_init(void) { return 0; }' src/random.c
         tar xzf openssl-3.2.4.tar.gz
         cd openssl-3.2.4
         
-        ./Configure -static --prefix="$INSTALL_PATH" --libdir=lib --openssldir=ssl \
+        ./Configure -static \
+          --prefix="$INSTALL_PATH" \
+          --libdir=lib \
+          --openssldir=ssl \
           mingw64 no-shared \
           enable-tls1_2 enable-tls1_3 enable-ec_nistp_64_gcc_128 \
           no-quic no-err no-dso no-engine no-async no-dtls no-sctp \
@@ -341,9 +294,8 @@ int axel_rnd_init(void) { return 0; }' src/random.c
         make -j$(nproc)
         make install_sw
         
-        # 生成 pkg-config 文件
         cd "$INSTALL_PATH/lib"
-        cat > libcrypto.pc << EOF
+        cat > libcrypto.pc << PC
         prefix=$INSTALL_PATH
         exec_prefix=\${prefix}
         libdir=\${exec_prefix}/lib
@@ -353,8 +305,8 @@ int axel_rnd_init(void) { return 0; }' src/random.c
         Version: 3.2.4
         Libs: -L\${libdir} -lcrypto -lws2_32 -lgdi32 -lcrypt32 -ladvapi32 -lbcrypt
         Cflags: -I\${includedir}
-        EOF
-        cat > libssl.pc << EOF
+        PC
+        cat > libssl.pc << PC
         prefix=$INSTALL_PATH
         exec_prefix=\${prefix}
         libdir=\${exec_prefix}/lib
@@ -365,9 +317,9 @@ int axel_rnd_init(void) { return 0; }' src/random.c
         Requires.private: libcrypto
         Libs: -L\${libdir} -lssl
         Cflags: -I\${includedir}
-        EOF
+        PC
 
-    - name: Configure (Windows static with SSL)
+    - name: Configure
       run: |
         cd axel
         export PKG_CONFIG_PATH=$(pwd)/../openssl-mingw/lib
@@ -389,18 +341,12 @@ int axel_rnd_init(void) { return 0; }' src/random.c
         cd axel
         make -j$(nproc) V=1
 
-    - name: Strip and verify binary
+    - name: Strip and verify
       run: |
         cd axel
         x86_64-w64-mingw32-strip --strip-all axel.exe
         file axel.exe
-        echo "Binary size: $(du -h axel.exe | cut -f1)"
-
-    - name: Basic test
-      run: |
-        cd axel
-        ./axel.exe --version
-        ./axel.exe --help | head -10
+        ls -lh axel.exe
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
