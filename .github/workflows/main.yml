@@ -93,8 +93,22 @@ jobs:
         sed -i '/http_addheader.*Range: bytes=%lld-%lld/s/conn->lastbyte, conn->currentbyte/(long long)conn->lastbyte, (long long)conn->currentbyte/' src/http.c
         sed -i '/http_addheader.*Range: bytes=%lld-/s/conn->currentbyte/(long long)conn->currentbyte/' src/http.c
         
-        # ---------- src/tcp.c: Winsock error handling and fcntl fixes ----------
-        # 1. 完全重写 tcp_error 函数，Windows 下强制输出 Winsock 错误码
+        # ---------- src/tcp.c: Winsock init, error handling, fcntl fixes ----------
+        # 1. 在 tcp_connect 函数开头添加 Winsock 初始化
+        sed -i '/^tcp_connect(tcp_t \*tcp, char \*hostname, int port, int secure, char \*local_if,$/,/^{/ {
+          /^{/ a\
+        #ifdef __MINGW32__\
+        \tstatic int wsa_init = 0;\
+        \tif (!wsa_init) {\
+        \t\tWSADATA wsaData;\
+        \t\tif (WSAStartup(MAKEWORD(2,2), &wsaData) == 0) {\
+        \t\t\twsa_init = 1;\
+        \t\t}\
+        \t}\
+        #endif
+        }' src/tcp.c
+        
+        # 2. 完全重写 tcp_error 函数，Windows 下强制输出 Winsock 错误码
         sed -i '/^inline static void$/,/^}$/c\
         #ifdef __MINGW32__\
         static void tcp_error(char *hostname, int port, const char *reason)\
@@ -112,7 +126,7 @@ jobs:
         }\
         #endif' src/tcp.c
         
-        # 2. fcntl -> ioctlsocket
+        # 3. fcntl -> ioctlsocket
         sed -i 's/fcntl(sock_fd, F_SETFL, O_NONBLOCK)/{\
         \t\t\tunsigned long mode = 1;\
         \t\t\tioctlsocket(sock_fd, FIONBIO, \&mode);\
@@ -122,14 +136,14 @@ jobs:
         \t\t\tioctlsocket(sock_fd, FIONBIO, \&mode);\
         \t\t}/g' src/tcp.c
         
-        # 3. 替换 setsockopt 前的 tout 定义（位于 "Set I/O timeout" 注释后）
+        # 4. 替换 setsockopt 前的 tout 定义（位于 "Set I/O timeout" 注释后）
         sed -i '/\/\* Set I\/O timeout \*\//,/;/ s/struct timeval tout = { \.tv_sec  = io_timeout };/DWORD tout = io_timeout * 1000;/' src/tcp.c
         
-        # 4. 调整 setsockopt 调用以兼容 DWORD
+        # 5. 调整 setsockopt 调用以兼容 DWORD
         sed -i 's/setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, &tout, sizeof(tout))/setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)\&tout, sizeof(tout))/' src/tcp.c
         sed -i 's/setsockopt(sock_fd, SOL_SOCKET, SO_SNDTIMEO, &tout, sizeof(tout))/setsockopt(sock_fd, SOL_SOCKET, SO_SNDTIMEO, (const char *)\&tout, sizeof(tout))/' src/tcp.c
         
-        # 5. 禁用 get_if_ip
+        # 6. 禁用 get_if_ip
         sed -i '/^get_if_ip(/,/^}/c\
         get_if_ip(char *dst, size_t len, const char *iface)\
         {\
@@ -152,20 +166,6 @@ jobs:
         {\
         \treturn 0;\
         }' src/random.c
-        
-        # ---------- src/axel.c: Winsock 初始化 ----------
-        sed -i '/^axel_t \*axel_new(/,/^{/ {
-          n
-          i \
-        \tWSADATA wsaData;\
-        \tstatic int wsa_init = 0;\
-        \tif (!wsa_init) {\
-        \t\tif (WSAStartup(MAKEWORD(2, 2), \&wsaData) != 0) {\
-        \t\t\treturn NULL;\
-        \t\t}\
-        \t\twsa_init = 1;\
-        \t}
-        }' src/axel.c
         
         echo "All fixes applied."
         EOF
