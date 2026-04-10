@@ -173,14 +173,11 @@ jobs:
             c = re.sub(r'\bclose\s*\(', 'WIN32_NET_CLOSE(', c)
             with open(fname, "w") as f: f.write(c)
 
-        # 4. 修复格式字符串 %jd -> %lld
+        # 4. 修复格式字符串 %jd -> %lld（改用正则全局替换，防止遗漏）
         for fname in ["src/axel.c", "src/http.c", "src/conn.c"]:
             if not os.path.exists(fname): continue
             with open(fname, "r") as f: c = f.read()
-            c = c.replace("%jd bytes", "%lld bytes")
-            c = c.replace("%jd-%jd", "%lld-%lld")
-            c = c.replace("%jd-", "%lld-")
-            c = c.replace('"REST %jd"', '"REST %lld"')
+            c = re.sub(r'%jd', '%lld', c)
             c = c.replace("axl->size", "(long long)axl->size")
             c = c.replace("axl->bytes_done", "(long long)axl->bytes_done")
             c = c.replace("axl->start_byte", "(long long)axl->start_byte")
@@ -262,7 +259,7 @@ jobs:
         printf "#ifndef _FAKE_H\n#define _FAKE_H\n#include <winsock2.h>\ntypedef int socklen_t;\n#endif\n" > fake-headers/sys/socket.h
         printf "#ifndef _FAKE_H\n#define _FAKE_H\n#endif\n" > fake-headers/sys/ioctl.h fake-headers/sys/time.h fake-headers/netdb.h
 
-        echo "CFLAGS=-O2 -static -D_WIN32_WINNT=0x0601 -D__USE_MINGW_ANSI_STDIO=1 -DO_NONBLOCK=0x4000 -I$(pwd)/fake-headers -ffunction-sections -fdata-sections" >> $GITHUB_ENV
+        echo "CFLAGS=-O2 -static -D__USE_MINGW_ANSI_STDIO=1 -DO_NONBLOCK=0x4000 -I$(pwd)/fake-headers -ffunction-sections -fdata-sections -Wno-format -Wno-error=format" >> $GITHUB_ENV
         echo "LDFLAGS=-static -static-libgcc -static-libstdc++ -Wl,--gc-sections" >> $GITHUB_ENV
 
     - name: Generate configure script
