@@ -237,7 +237,8 @@ jobs:
         printf "#ifndef _FAKE_H\n#define _FAKE_H\n#include <winsock2.h>\n#endif\n" > fake-headers/arpa/inet.h
         touch fake-headers/net/if.h fake-headers/net/if_arp.h fake-headers/linux/if_ether.h
         printf "#ifndef _FAKE_H\n#define _FAKE_H\n#include <winsock2.h>\ntypedef int socklen_t;\n#endif\n" > fake-headers/sys/socket.h
-        printf "#ifndef _FAKE_H\n#define _FAKE_H\n#endif\n" > fake-headers/sys/ioctl.h fake-headers/sys/time.h fake-headers/netdb.h
+        printf "#ifndef _FAKE_H\n#define _FAKE_H\n#endif\n" > fake-headers/sys/ioctl.h fake-headers/sys/time.h
+        printf "#ifndef _FAKE_NETDB_H\n#define _FAKE_NETDB_H\n#include <winsock2.h>\n#include <ws2tcpip.h>\n#endif\n" > fake-headers/netdb.h
 
         echo "CFLAGS=-O2 -static -D__USE_MINGW_ANSI_STDIO=1 -DO_NONBLOCK=0x4000 -I$(pwd)/fake-headers -ffunction-sections -fdata-sections -Wno-error=format -Wno-error" >> $GITHUB_ENV
         echo "LDFLAGS=-static -static-libgcc -static-libstdc++ -Wl,--gc-sections" >> $GITHUB_ENV
