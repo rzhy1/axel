@@ -173,19 +173,16 @@ jobs:
             c = re.sub(r'\bclose\s*\(', 'WIN32_NET_CLOSE(', c)
             with open(fname, "w") as f: f.write(c)
 
-        # 4. 修复格式字符串 %jd -> %lld（仅修复格式字符串，不盲目强转变量）
+        # 4. 修复格式字符串 %jd -> %lld
         for fname in ["src/axel.c", "src/http.c", "src/conn.c"]:
             if not os.path.exists(fname): continue
             with open(fname, "r") as f: c = f.read()
-            # 只替换格式字符串中的 %jd，避免影响赋值语句
             c = re.sub(r'%jd', '%lld', c)
             with open(fname, "w") as f: f.write(c)
 
         # 5. 修复 tcp.c 平台差异
         with open("src/tcp.c", "r") as f: c = f.read()
-        # 移除 fcntl
         c = re.sub(r'\s*fcntl\s*\(.*F_SETFL.*\);', '', c)
-        # 替换超时设置
         c = re.sub(
             r'struct timeval tout.*?setsockopt\(.*SO_RCVTIMEO.*?\);.*?setsockopt\(.*SO_SNDTIMEO.*?\);',
             """#ifdef __MINGW32__
@@ -202,9 +199,7 @@ jobs:
             #endif""",
             c, flags=re.DOTALL
         )
-        # 移除 get_if_ip
         c = re.sub(r'\nint\s+get_if_ip\s*\(.*?\)\s*{.*?}\s*', '', c, flags=re.DOTALL)
-        # 替换 tcp_error
         c = re.sub(
             r'inline static void\s+tcp_error\s*\(.*?\)\s*{.*?}',
             """#ifdef __MINGW32__
@@ -221,11 +216,12 @@ jobs:
         )
         with open("src/tcp.c", "w") as f: f.write(c)
 
-        # 6. 其他 Stub 函数
+        # 6. 修复 Stub 函数（生成合法 C 语法）
         for stub_file, func in [("src/text.c", "get_term_width"), ("src/random.c", "axel_rnd_init")]:
             if not os.path.exists(stub_file): continue
             with open(stub_file, "r") as f: c = f.read()
-            c = re.sub(rf'\w+\s+{func}\s*\(.*?\)\s*{{.*?}}', f'int {func}(void) {{ return 80 if "{func}" == "get_term_width" else 0; }}', c, flags=re.DOTALL)
+            ret_val = "80" if func == "get_term_width" else "0"
+            c = re.sub(rf'\w+\s+{func}\s*\(.*?\)\s*{{.*?}}', f'int {func}(void) {{ return {ret_val}; }}', c, flags=re.DOTALL)
             with open(stub_file, "w") as f: f.write(c)
 
         # 7. 启用 CA 证书自动搜索
@@ -253,9 +249,9 @@ jobs:
         printf "#ifndef _FAKE_H\n#define _FAKE_H\n#include <winsock2.h>\n#endif\n" > fake-headers/arpa/inet.h
         touch fake-headers/net/if.h fake-headers/net/if_arp.h fake-headers/linux/if_ether.h
         printf "#ifndef _FAKE_H\n#define _FAKE_H\n#include <winsock2.h>\ntypedef int socklen_t;\n#endif\n" > fake-headers/sys/socket.h
-        printf "#ifndef _FAKE_H\n#define _FAKE_H\n#endif\n" > fake-headers/sys/ioctl.h fake-headers/sys/time.h fake-headers/netdb.h
+        printf "#ifndef _FAKE_H\n#define _FAKE_H\n#endif\n" > fake-headers/sys/ioctl.h fake-headers/sys/time.h
 
-        echo "CFLAGS=-O2 -static -D__USE_MINGW_ANSI_STDIO=1 -DO_NONBLOCK=0x4000 -I$(pwd)/fake-headers -ffunction-sections -fdata-sections -Wno-error=format" >> $GITHUB_ENV
+        echo "CFLAGS=-O2 -static -D__USE_MINGW_ANSI_STDIO=1 -DO_NONBLOCK=0x4000 -I$(pwd)/fake-headers -ffunction-sections -fdata-sections -Wno-error=format -Wno-error" >> $GITHUB_ENV
         echo "LDFLAGS=-static -static-libgcc -static-libstdc++ -Wl,--gc-sections" >> $GITHUB_ENV
 
     - name: Generate configure script
