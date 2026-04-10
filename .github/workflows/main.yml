@@ -262,7 +262,7 @@ jobs:
         printf "#ifndef _FAKE_H\n#define _FAKE_H\n#include <winsock2.h>\ntypedef int socklen_t;\n#endif\n" > fake-headers/sys/socket.h
         printf "#ifndef _FAKE_H\n#define _FAKE_H\n#endif\n" > fake-headers/sys/ioctl.h fake-headers/sys/time.h fake-headers/netdb.h
 
-        echo "CFLAGS=-O2 -static -D_WIN32_WINNT=0x0601 -D__USE_MINGW_ANSI_STDIO=1 -I$(pwd)/fake-headers -ffunction-sections -fdata-sections" >> $GITHUB_ENV
+        echo "CFLAGS=-O2 -static -D_WIN32_WINNT=0x0601 -D__USE_MINGW_ANSI_STDIO=1 -DO_NONBLOCK=0x4000 -I$(pwd)/fake-headers -ffunction-sections -fdata-sections" >> $GITHUB_ENV
         echo "LDFLAGS=-static -static-libgcc -static-libstdc++ -Wl,--gc-sections" >> $GITHUB_ENV
 
     - name: Generate configure script
@@ -332,7 +332,6 @@ jobs:
           ac_cv_header_sys_socket_h=yes \
           ac_cv_func_nanosleep=yes \
           ac_cv_func_gettimeofday=yes \
-          ac_cv_decl_O_NONBLOCK=yes \
           LIBS="-lws2_32 -lcrypt32 -ladvapi32 -lgdi32 -lbcrypt"
 
     - name: Build
