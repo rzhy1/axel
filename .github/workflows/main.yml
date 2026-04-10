@@ -49,8 +49,6 @@ jobs:
         import os
         import stat
 
-        os.chdir("axel")
-
         # 1. 修复 src/axel.h
         with open("src/axel.h", "r") as f:
             h = f.read()
