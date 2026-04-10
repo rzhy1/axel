@@ -50,6 +50,7 @@ jobs:
         echo "Applying Windows compatibility fixes..."
         
         # ---------- src/axel.h modifications ----------
+        # 在 sys/time.h 包含后添加 Windows 兼容定义
         sed -i '/^#include <sys\/time.h>/a \
         \
         /* Windows/MinGW compatibility */\
@@ -63,8 +64,10 @@ jobs:
         #define AF_UNSPEC 0\
         #endif' src/axel.h
         
-        sed -i 's|^#include <net/if.h>|/* #include <net/if.h> */  /* Not needed on Windows */|' src/axel.h
+        # 移除 net/if.h 包含（Windows 不需要）
+        sed -i 's|^#include <net/if.h>|/* #include <net/if.h> */|' src/axel.h
         
+        # 在 "search.h" 包含后处理 min/max 宏冲突
         sed -i '/^#include "search.h"/a \
         \
         /* Windows defines min/max, undefine to use Axel'\''s own */\
@@ -75,12 +78,13 @@ jobs:
         #undef max\
         #endif' src/axel.h
         
+        # 添加 ssize_t 类型定义
         echo '' >> src/axel.h
         echo '/* Windows lacks ssize_t */' >> src/axel.h
         echo 'typedef long long ssize_t;' >> src/axel.h
         sed -i '/^#define UINT64_C(c) c ## ULL$/d' src/axel.h
         
-        # ---------- Format specifier fixes ----------
+        # ---------- 格式化字符串修正 (%jd -> %lld) ----------
         sed -i 's|"File size: %s (%jd bytes)"|"File size: %s (%lld bytes)"|' src/axel.c
         sed -i 's|"State file found: %jd bytes downloaded, %jd to go."|"State file found: %lld bytes downloaded, %lld to go."|' src/axel.c
         sed -i 's|"REST %jd"|"REST %lld"|' src/conn.c
@@ -93,22 +97,34 @@ jobs:
         sed -i '/http_addheader.*Range: bytes=%lld-%lld/s/conn->lastbyte, conn->currentbyte/(long long)conn->lastbyte, (long long)conn->currentbyte/' src/http.c
         sed -i '/http_addheader.*Range: bytes=%lld-/s/conn->currentbyte/(long long)conn->currentbyte/' src/http.c
         
-        # ---------- src/tcp.c: Replace fcntl with ioctlsocket ----------
-        sed -i 's/fcntl(sock_fd, F_SETFL, O_NONBLOCK)/{\
-        \tunsigned long mode = 1;\
-        \tioctlsocket(sock_fd, FIONBIO, \&mode);\
-        }/g' src/tcp.c
-        sed -i 's/fcntl(sock_fd, F_SETFL, 0)/{\
-        \tunsigned long mode = 0;\
-        \tioctlsocket(sock_fd, FIONBIO, \&mode);\
-        }/g' src/tcp.c
+        # ---------- src/tcp.c: 添加 Winsock 错误处理并修复 fcntl ----------
         
-        sed -i '/struct timeval tout;/c\\tDWORD tout = DEFAULT_IO_TIMEOUT * 1000;' src/tcp.c
+        # 1. 在 tcp.c 开头（包含 axel.h 之后）添加自定义错误函数
+        sed -i '/^#include "axel.h"/a \
+        \
+        #ifdef __MINGW32__\
+        #include <stdio.h>\
+        static const char *winsock_strerror(int err) {\
+            static char msg[64];\
+            snprintf(msg, sizeof(msg), "Winsock error %d", err);\
+            return msg;\
+        }\
+        #endif' src/tcp.c
         
-        sed -i 's|setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, &tout, sizeof(tout))|setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)\&tout, sizeof(tout))|' src/tcp.c
-        sed -i 's|setsockopt(sock_fd, SOL_SOCKET, SO_SNDTIMEO, &tout, sizeof(tout))|setsockopt(sock_fd, SOL_SOCKET, SO_SNDTIMEO, (const char *)\&tout, sizeof(tout))|' src/tcp.c
+        # 2. 修改 tcp_error 调用：将 strerror(errno) 替换为 winsock_strerror(WSAGetLastError())
+        #    注意 tcp_error 函数本身不变，只改变传入的参数
+        sed -i 's/tcp_error(hostname, port, strerror(errno))/tcp_error(hostname, port, winsock_strerror(WSAGetLastError()))/' src/tcp.c
         
-        # ---------- Override get_if_ip with a simple stub ----------
+        # 3. 将 fcntl 非阻塞设置替换为 ioctlsocket（Windows 兼容）
+        sed -i '/fcntl(sock_fd, F_SETFL, O_NONBLOCK)/c\\t\t\tunsigned long mode = 1;\n\t\t\tioctlsocket(sock_fd, FIONBIO, \&mode);' src/tcp.c
+        sed -i '/fcntl(sock_fd, F_SETFL, 0)/c\\t\t\tunsigned long mode = 0;\n\t\t\tioctlsocket(sock_fd, FIONBIO, \&mode);' src/tcp.c
+        
+        # 4. 修改 select 超时结构体为 Windows 兼容的 DWORD（SO_RCVTIMEO/SO_SNDTIMEO）
+        sed -i 's/struct timeval tout = { \.tv_sec  = io_timeout };/DWORD tout = io_timeout * 1000;/' src/tcp.c
+        sed -i 's/setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, &tout, sizeof(tout))/setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)\&tout, sizeof(tout))/' src/tcp.c
+        sed -i 's/setsockopt(sock_fd, SOL_SOCKET, SO_SNDTIMEO, &tout, sizeof(tout))/setsockopt(sock_fd, SOL_SOCKET, SO_SNDTIMEO, (const char *)\&tout, sizeof(tout))/' src/tcp.c
+        
+        # 5. 禁用 get_if_ip 函数（Windows 无 ifreq）
         sed -i '/^get_if_ip(/,/^}/c\
         get_if_ip(char *dst, size_t len, const char *iface)\
         {\
@@ -118,22 +134,21 @@ jobs:
         \treturn -1;\
         }' src/tcp.c
         
-        # ---------- Override get_term_width with a simple stub ----------
+        # ---------- src/text.c: 禁用终端宽度检测 ----------
         sed -i '/^get_term_width(/,/^}/c\
         get_term_width(void)\
         {\
         \treturn 80;\
         }' src/text.c
         
-        # ---------- src/random.c: Disable /dev/random requirement ----------
+        # ---------- src/random.c: 禁用 /dev/random 依赖 ----------
         sed -i '/^axel_rnd_init(/,/^}/c\
         axel_rnd_init(void)\
         {\
         \treturn 0;\
         }' src/random.c
         
-        # ---------- WinSock initialization ----------
-        # Insert WSAStartup in axel_new (src/axel.c)
+        # ---------- src/axel.c: 初始化 Winsock ----------
         sed -i '/^axel_t \*axel_new(/,/^{/ {
           n
           i \
@@ -146,22 +161,6 @@ jobs:
         \t\twsa_init = 1;\
         \t}
         }' src/axel.c
-        
-        # ---------- Winsock error handling (safe, no windows.h) ----------
-        # 在 tcp.c 中 #include "axel.h" 之后插入简单的错误码输出函数
-        sed -i '/^#include "axel.h"/a \
-        \
-        #ifdef __MINGW32__\
-        #include <stdio.h>\
-        static const char *winsock_strerror(int err) {\
-            static char msg[64];\
-            snprintf(msg, sizeof(msg), "Winsock error %d", err);\
-            return msg;\
-        }\
-        #endif' src/tcp.c
-        
-        # 替换 strerror(errno) 为 winsock_strerror(WSAGetLastError())
-        sed -i 's/strerror(errno)/winsock_strerror(WSAGetLastError())/g' src/tcp.c
         
         echo "All fixes applied."
         EOF
