@@ -126,25 +126,17 @@ jobs:
         }\
         #endif' src/tcp.c
         
-        # 3. Windows 下禁用非阻塞模式：注释掉 fcntl 调用，并删除恢复阻塞的语句
-        sed -i 's/^\t\t\tfcntl(sock_fd, F_SETFL, O_NONBLOCK);$/\
-        #ifdef __MINGW32__\
-        \t\t\t/* Windows: rely on SO_SNDTIMEO for connect timeout, stay blocking */\
-        #else\
-        \t\t\tfcntl(sock_fd, F_SETFL, O_NONBLOCK);\
-        #endif/' src/tcp.c
+        # 3. Windows 下禁用非阻塞模式：用 #ifdef 包裹 fcntl 调用
+        sed -i 's|^\t\t\tfcntl(sock_fd, F_SETFL, O_NONBLOCK);|#ifdef __MINGW32__\n\t\t\t/* Windows: rely on SO_SNDTIMEO for connect timeout, stay blocking */\n#else\n\t\t\tfcntl(sock_fd, F_SETFL, O_NONBLOCK);\n#endif|' src/tcp.c
         
-        sed -i 's/^\tfcntl(sock_fd, F_SETFL, 0);$/\
-        #ifndef __MINGW32__\
-        \tfcntl(sock_fd, F_SETFL, 0);\
-        #endif/' src/tcp.c
+        sed -i 's|^\tfcntl(sock_fd, F_SETFL, 0);|#ifndef __MINGW32__\n\tfcntl(sock_fd, F_SETFL, 0);\n#endif|' src/tcp.c
         
         # 4. 替换 setsockopt 前的 tout 定义（位于 "Set I/O timeout" 注释后）
         sed -i '/\/\* Set I\/O timeout \*\//,/;/ s/struct timeval tout = { \.tv_sec  = io_timeout };/DWORD tout = io_timeout * 1000;/' src/tcp.c
         
         # 5. 调整 setsockopt 调用以兼容 DWORD
-        sed -i 's/setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, &tout, sizeof(tout))/setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)\&tout, sizeof(tout))/' src/tcp.c
-        sed -i 's/setsockopt(sock_fd, SOL_SOCKET, SO_SNDTIMEO, &tout, sizeof(tout))/setsockopt(sock_fd, SOL_SOCKET, SO_SNDTIMEO, (const char *)\&tout, sizeof(tout))/' src/tcp.c
+        sed -i 's|setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, &tout, sizeof(tout))|setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)\&tout, sizeof(tout))|' src/tcp.c
+        sed -i 's|setsockopt(sock_fd, SOL_SOCKET, SO_SNDTIMEO, &tout, sizeof(tout))|setsockopt(sock_fd, SOL_SOCKET, SO_SNDTIMEO, (const char *)\&tout, sizeof(tout))|' src/tcp.c
         
         # 6. 禁用 get_if_ip
         sed -i '/^get_if_ip(/,/^}/c\
