@@ -94,19 +94,7 @@ jobs:
         sed -i '/http_addheader.*Range: bytes=%lld-/s/conn->currentbyte/(long long)conn->currentbyte/' src/http.c
         
         # ---------- src/tcp.c: Winsock error handling and fcntl fixes ----------
-        # 1. 在 axel.h 包含后添加自定义 Winsock 错误函数（可选，用于其他地方）
-        sed -i '/^#include "axel.h"/a \
-        \
-        #ifdef __MINGW32__\
-        #include <stdio.h>\
-        static const char *winsock_strerror(int err) {\
-            static char msg[64];\
-            snprintf(msg, sizeof(msg), "Winsock error %d", err);\
-            return msg;\
-        }\
-        #endif' src/tcp.c
-        
-        # 2. 完全重写 tcp_error 函数，Windows 下强制输出 Winsock 错误码
+        # 1. 完全重写 tcp_error 函数，Windows 下强制输出 Winsock 错误码
         sed -i '/^inline static void$/,/^}$/c\
         #ifdef __MINGW32__\
         static void tcp_error(char *hostname, int port, const char *reason)\
@@ -124,7 +112,7 @@ jobs:
         }\
         #endif' src/tcp.c
         
-        # 3. fcntl -> ioctlsocket
+        # 2. fcntl -> ioctlsocket
         sed -i 's/fcntl(sock_fd, F_SETFL, O_NONBLOCK)/{\
         \t\t\tunsigned long mode = 1;\
         \t\t\tioctlsocket(sock_fd, FIONBIO, \&mode);\
@@ -134,14 +122,14 @@ jobs:
         \t\t\tioctlsocket(sock_fd, FIONBIO, \&mode);\
         \t\t}/g' src/tcp.c
         
-        # 4. 替换 setsockopt 前的 tout 定义（位于 "Set I/O timeout" 注释后）
+        # 3. 替换 setsockopt 前的 tout 定义（位于 "Set I/O timeout" 注释后）
         sed -i '/\/\* Set I\/O timeout \*\//,/;/ s/struct timeval tout = { \.tv_sec  = io_timeout };/DWORD tout = io_timeout * 1000;/' src/tcp.c
         
-        # 5. 调整 setsockopt 调用以兼容 DWORD
+        # 4. 调整 setsockopt 调用以兼容 DWORD
         sed -i 's/setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, &tout, sizeof(tout))/setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)\&tout, sizeof(tout))/' src/tcp.c
         sed -i 's/setsockopt(sock_fd, SOL_SOCKET, SO_SNDTIMEO, &tout, sizeof(tout))/setsockopt(sock_fd, SOL_SOCKET, SO_SNDTIMEO, (const char *)\&tout, sizeof(tout))/' src/tcp.c
         
-        # 6. 禁用 get_if_ip
+        # 5. 禁用 get_if_ip
         sed -i '/^get_if_ip(/,/^}/c\
         get_if_ip(char *dst, size_t len, const char *iface)\
         {\
