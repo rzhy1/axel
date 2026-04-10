@@ -1,4 +1,4 @@
-name: Build Axel (Windows Static, Stable)
+name: Build Axel (Windows Static) with HTTPS Support
 
 on:
   push:
@@ -9,123 +9,282 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-    - name: Install dependencies
+    - name: Install build dependencies
       run: |
         sudo apt-get update
         sudo apt-get install -y \
-          git mingw-w64 automake libtool gettext autopoint \
-          pkg-config make autoconf autoconf-archive txt2man wget
+          git \
+          mingw-w64 \
+          automake \
+          libtool \
+          gettext \
+          autopoint \
+          pkg-config \
+          make \
+          autoconf-archive \
+          txt2man
 
-    # -------------------------------
-    # 1. 构建 OpenSSL（稳定配置）
-    # -------------------------------
-    - name: Build OpenSSL (static, safe)
+    - name: Build and Install Autoconf 2.72
       run: |
-        wget -q https://github.com/openssl/openssl/releases/download/openssl-3.2.1/openssl-3.2.1.tar.gz
-        tar xzf openssl-3.2.1.tar.gz
-        cd openssl-3.2.1
-
-        ./Configure mingw64 \
-          --cross-compile-prefix=x86_64-w64-mingw32- \
-          no-shared no-tests no-apps no-docs \
-          --prefix=$PWD/../openssl-mingw
-
+        wget https://ftp.gnu.org/gnu/autoconf/autoconf-2.72.tar.xz
+        tar -xf autoconf-2.72.tar.xz
+        cd autoconf-2.72
+        ./configure --prefix=/usr/local
         make -j$(nproc)
-        make install_sw
+        sudo make install
+        autoconf --version
 
-    # -------------------------------
-    # 2. 获取 Axel
-    # -------------------------------
-    - name: Clone Axel
+    - name: Clone axel source
       run: |
         git clone https://github.com/axel-download-accelerator/axel.git
         cd axel
         git submodule update --init --recursive
 
-    # -------------------------------
-    # 3. 最小 Windows 兼容补丁
-    # -------------------------------
-    - name: Apply minimal Windows fixes
+    - name: Create and run comprehensive fix script
       run: |
         cd axel
+        cat > fix-axel.sh << 'EOF'
+        #!/bin/bash
+        set -e
 
-        cat > winfix.patch << 'EOF'
-        diff --git a/src/axel.c b/src/axel.c
-        index 1111111..2222222 100644
-        --- a/src/axel.c
-        +++ b/src/axel.c
-        @@
-        +#ifdef _WIN32
-        +#include <winsock2.h>
-        +#endif
-        +
-        +static void axel_win_init(void)
-        +{
-        +#ifdef _WIN32
-        +    static int initialized = 0;
-        +    if (!initialized) {
-        +        WSADATA wsa;
-        +        WSAStartup(MAKEWORD(2,2), &wsa);
-        +        initialized = 1;
-        +    }
-        +#endif
-        +}
-        +
-         axel_t *axel_new(void)
-         {
-        +    axel_win_init();
+        echo "Applying Windows compatibility fixes..."
+
+        # ---------- src/axel.h modifications ----------
+        sed -i '/^#include <sys\/time.h>/a \
+        \
+        /* Windows/MinGW compatibility */\
+        #ifdef __MINGW32__\
+        #include <stdint.h>\
+        #include <ws2tcpip.h>\
+        #include <winsock2.h>\
+        #define sa_family_t ADDRESS_FAMILY\
+        #define AF_INET   2\
+        #define AF_INET6  23\
+        #define AF_UNSPEC 0\
+        #endif' src/axel.h
+
+        sed -i 's|^#include <net/if.h>|/* #include <net/if.h> */  /* Not needed on Windows */|' src/axel.h
+
+        sed -i '/^#include "search.h"/a \
+        \
+        /* Windows defines min/max, undefine to use Axel'\''s own */\
+        #ifdef min\
+        #undef min\
+        #endif\
+        #ifdef max\
+        #undef max\
+        #endif' src/axel.h
+
+        echo '' >> src/axel.h
+        echo '/* Windows lacks ssize_t */' >> src/axel.h
+        echo 'typedef long long ssize_t;' >> src/axel.h
+        sed -i '/^#define UINT64_C(c) c ## ULL$/d' src/axel.h
+
+        # ---------- Format specifier fixes ----------
+        sed -i 's|"File size: %s (%jd bytes)"|"File size: %s (%lld bytes)"|' src/axel.c
+        sed -i 's|"State file found: %jd bytes downloaded, %jd to go."|"State file found: %lld bytes downloaded, %lld to go."|' src/axel.c
+        sed -i 's|"REST %jd"|"REST %lld"|' src/conn.c
+        sed -i '/axl_message.*File size/s/axl->size/(long long)axl->size/' src/axel.c
+        sed -i '/State file found/s/axl->bytes_done/(long long)axl->bytes_done/; /State file found/s/axl->start_byte/(long long)axl->start_byte/' src/axel.c
+        sed -i '/ftp_command.*REST/s/conn->currentbyte/(long long)conn->currentbyte/' src/conn.c
+
+        sed -i 's|"Range: bytes=%jd-%jd"|"Range: bytes=%lld-%lld"|' src/http.c
+        sed -i 's|"Range: bytes=%jd-"|"Range: bytes=%lld-"|' src/http.c
+        sed -i '/http_addheader.*Range: bytes=%lld-%lld/s/conn->lastbyte, conn->currentbyte/(long long)conn->lastbyte, (long long)conn->currentbyte/' src/http.c
+        sed -i '/http_addheader.*Range: bytes=%lld-/s/conn->currentbyte/(long long)conn->currentbyte/' src/http.c
+
+        # ---------- src/tcp.c: Replace fcntl with ioctlsocket ----------
+        sed -i 's/fcntl(sock_fd, F_SETFL, O_NONBLOCK)/{\
+        \tunsigned long mode = 1;\
+        \tioctlsocket(sock_fd, FIONBIO, \&mode);\
+        }/g' src/tcp.c
+        sed -i 's/fcntl(sock_fd, F_SETFL, 0)/{\
+        \tunsigned long mode = 0;\
+        \tioctlsocket(sock_fd, FIONBIO, \&mode);\
+        }/g' src/tcp.c
+
+        sed -i '/struct timeval tout;/c\\tDWORD tout = DEFAULT_IO_TIMEOUT * 1000;' src/tcp.c
+
+        sed -i 's|setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, &tout, sizeof(tout))|setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)\&tout, sizeof(tout))|' src/tcp.c
+        sed -i 's|setsockopt(sock_fd, SOL_SOCKET, SO_SNDTIMEO, &tout, sizeof(tout))|setsockopt(sock_fd, SOL_SOCKET, SO_SNDTIMEO, (const char *)\&tout, sizeof(tout))|' src/tcp.c
+
+        # ---------- Override get_if_ip with a simple stub ----------
+        sed -i '/^get_if_ip(/,/^}/c\
+        get_if_ip(char *dst, size_t len, const char *iface)\
+        {\
+        \t(void)dst;\
+        \t(void)len;\
+        \t(void)iface;\
+        \treturn -1;\
+        }' src/tcp.c
+
+        # ---------- Override get_term_width with a simple stub ----------
+        sed -i '/^get_term_width(/,/^}/c\
+        get_term_width(void)\
+        {\
+        \treturn 80;\
+        }' src/text.c
+
+        # ---------- src/random.c: Disable /dev/random requirement ----------
+        sed -i '/^axel_rnd_init(/,/^}/c\
+        axel_rnd_init(void)\
+        {\
+        \treturn 0;\
+        }' src/random.c
+
+        # ---------- WinSock initialization and error handling ----------
+        # ---------- Winsock error handling ----------
+        # 添加自定义错误函数到 tcp.c 顶部
+        sed -i '1i\
+        #ifdef __MINGW32__\
+        #include <windows.h>\
+        static const char *winsock_strerror(int err) {\
+            static char msg[256];\
+            FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,\
+                           NULL, err, 0, msg, sizeof(msg), NULL);\
+            return msg;\
+        }\
+        #endif' src/tcp.c
+        
+        # 替换错误输出调用
+        sed -i 's/strerror(errno)/winsock_strerror(WSAGetLastError())/g' src/tcp.c
+
+        echo "All fixes applied."
         EOF
 
-        patch -p1 < winfix.patch || true
+        chmod +x fix-axel.sh
+        ./fix-axel.sh
 
-        # ssize_t 兼容
-        sed -i '1i #ifdef _WIN32\n typedef long long ssize_t;\n #endif' src/axel.h
+    - name: Prepare build environment
+      run: |
+        echo "CC=x86_64-w64-mingw32-gcc" >> $GITHUB_ENV
+        echo "AR=x86_64-w64-mingw32-ar" >> $GITHUB_ENV
+        echo "RANLIB=x86_64-w64-mingw32-ranlib" >> $GITHUB_ENV
+        echo "STRIP=x86_64-w64-mingw32-strip" >> $GITHUB_ENV
+        mkdir -p fake-headers/netinet
+        touch fake-headers/netinet/in_systm.h
+        touch fake-headers/netinet/in.h
+        touch fake-headers/netinet/ip.h
+        touch fake-headers/netinet/if_ether.h
+        touch fake-headers/netinet/tcp.h
+        mkdir -p fake-headers/arpa
+        touch fake-headers/arpa/inet.h
+        mkdir -p fake-headers/net
+        touch fake-headers/net/if.h
+        touch fake-headers/net/if_arp.h
+        mkdir -p fake-headers/linux
+        touch fake-headers/linux/if_ether.h
+        mkdir -p fake-headers/sys
+        touch fake-headers/sys/socket.h
+        touch fake-headers/sys/ioctl.h
+        touch fake-headers/netdb.h
+        echo "CFLAGS=-O2 -static -D_WIN32_WINNT=0x0600 -DO_NONBLOCK=0x4000 -D__USE_MINGW_ANSI_STDIO=1 -I$(pwd)/fake-headers" >> $GITHUB_ENV
+        echo "LDFLAGS=-static -static-libgcc -static-libstdc++" >> $GITHUB_ENV
 
-        # fcntl -> ioctlsocket（仅替换非阻塞）
-        sed -i 's/fcntl(\(.*\), F_SETFL, O_NONBLOCK)/{u_long m=1;ioctlsocket(\1,FIONBIO,\&m);}/g' src/tcp.c
-
-    # -------------------------------
-    # 4. 生成 configure
-    # -------------------------------
-    - name: Generate configure
+    - name: Generate configure script
       run: |
         cd axel
+        mkdir -p m4 build-aux
         autoreconf -fi
 
-    # -------------------------------
-    # 5. 编译 Axel
-    # -------------------------------
-    - name: Build Axel (static)
+    - name: Cross compile OpenSSL for Windows (static, optimized)
+      run: |
+        INSTALL_PATH=$(pwd)/openssl-mingw
+        mkdir -p "$INSTALL_PATH"
+        wget -q https://github.com/openssl/openssl/releases/download/openssl-3.6.2/openssl-3.6.2.tar.gz
+        tar xzf openssl-3.6.2.tar.gz
+        cd openssl-3.6.2 || exit
+        DISABLED_FEATURES=(
+          no-quic no-err no-dso no-engine no-async no-autoalginit
+          no-dtls no-sctp no-ssl3 no-tls1 no-tls1_1
+          no-comp no-ts no-ocsp no-ct no-cms no-psk no-srp no-srtp no-rfc3779
+          no-fips no-acvp-tests no-docs no-stdio no-ui-console
+          no-afalgeng no-ssl-trace no-filenames
+          no-aria no-bf no-blake2 no-camellia no-cast no-cmac
+          no-dh no-dsa no-ec2m no-gost no-idea no-rc2 no-rc4 no-rc5 no-rmd160
+          no-scrypt no-seed no-siphash no-siv no-sm2 no-sm3 no-sm4 no-whirlpool
+          no-tests no-apps
+        )
+        CFLAGS="-O2 -ffunction-sections -fdata-sections -pipe -g0 -fvisibility=hidden"
+        LDFLAGS="-Wl,--gc-sections -Wl,--icf=all -static -static-libgcc"
+        ./Configure -static \
+          --prefix="$INSTALL_PATH" \
+          --libdir=lib \
+          mingw64 no-shared \
+          "${DISABLED_FEATURES[@]}" \
+          $CFLAGS \
+          $LDFLAGS
+        make -j$(nproc)
+        make install_sw
+        cd "$INSTALL_PATH/lib"
+        cat > libcrypto.pc << EOF
+        prefix=$INSTALL_PATH
+        exec_prefix=\${prefix}
+        libdir=\${exec_prefix}/lib
+        includedir=\${prefix}/include
+
+        Name: OpenSSL-libcrypto
+        Description: OpenSSL cryptography library
+        Version: 3.6.2
+        Libs: -L\${libdir} -lcrypto -lws2_32 -lgdi32 -lcrypt32 -ladvapi32
+        Cflags: -I\${includedir}
+        EOF
+
+        cat > libssl.pc << EOF
+        prefix=$INSTALL_PATH
+        exec_prefix=\${prefix}
+        libdir=\${exec_prefix}/lib
+        includedir=\${prefix}/include
+
+        Name: OpenSSL
+        Description: Secure Sockets Layer and cryptography libraries
+        Version: 3.6.2
+        Requires.private: libcrypto
+        Libs: -L\${libdir} -lssl
+        Cflags: -I\${includedir}
+        EOF
+
+    - name: Configure (Windows static with SSL)
       run: |
         cd axel
-
-        export PKG_CONFIG_PATH=$(pwd)/../openssl-mingw/lib/pkgconfig
-
-        export CC=x86_64-w64-mingw32-gcc
-        export CFLAGS="-O2 -static -D_WIN32_WINNT=0x0601"
-        export LDFLAGS="-static -static-libgcc"
-
+        export PKG_CONFIG_PATH=$(pwd)/../openssl-mingw/lib
         ./configure \
           --host=x86_64-w64-mingw32 \
-          --with-ssl=openssl \
           --disable-nls \
-          LIBS="-lws2_32 -lcrypt32"
+          --with-ssl=openssl \
+          ac_cv_header_arpa_inet_h=yes \
+          ac_cv_header_netdb_h=yes \
+          ac_cv_header_netinet_in_h=yes \
+          ac_cv_header_netinet_in_systm_h=yes \
+          ac_cv_header_netinet_ip_h=yes \
+          ac_cv_header_netinet_if_ether_h=yes \
+          ac_cv_header_netinet_tcp_h=yes \
+          ac_cv_header_net_if_h=yes \
+          ac_cv_header_net_if_arp_h=yes \
+          ac_cv_header_linux_if_ether_h=yes \
+          ac_cv_header_sys_socket_h=yes \
+          ac_cv_header_sys_time_h=yes \
+          ac_cv_header_sys_ioctl_h=yes \
+          ac_cv_header_sys_select_h=yes \
+          ac_cv_header_termios_h=yes \
+          ac_cv_func_nanosleep=yes \
+          ac_cv_func_gettimeofday=yes \
+          ac_cv_func_select=yes \
+          ac_cv_decl_O_NONBLOCK=yes \
+          LIBS="-lws2_32 -ladvapi32"
 
+    - name: Build
+      run: |
+        cd axel
         make -j$(nproc)
 
-    # -------------------------------
-    # 6. Strip
-    # -------------------------------
     - name: Strip binary
       run: |
         cd axel
         x86_64-w64-mingw32-strip axel.exe
 
-    # -------------------------------
-    # 7. 上传
-    # -------------------------------
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: axel-windows-static-stable
+        name: axel-windows-static-ssl
         path: axel/axel.exe
