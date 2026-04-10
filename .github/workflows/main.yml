@@ -200,17 +200,24 @@ jobs:
         #endif' src/tcp.c
         
         # ---------- 移除 fcntl 非阻塞设置（包装器已处理错误码映射）----------
-        # 注释掉设置非阻塞的 fcntl 行
         sed -i 's/^\t\t\tfcntl(sock_fd, F_SETFL, O_NONBLOCK);$/\/\/ fcntl(F_SETFL, O_NONBLOCK) not needed on Windows/' src/tcp.c
-        # 注释掉恢复阻塞的 fcntl 行
         sed -i 's/^\tfcntl(sock_fd, F_SETFL, 0);$/\/\/ fcntl(F_SETFL, 0) not needed on Windows/' src/tcp.c
         
-        # Windows 下 setsockopt 超时使用 DWORD
-        sed -i '/\/\* Set I\/O timeout \*\//,/;/ s/struct timeval tout = { \.tv_sec  = io_timeout };/#ifdef __MINGW32__\n\tDWORD tout = io_timeout * 1000;\n#else\n\tstruct timeval tout = { .tv_sec = io_timeout };\n#endif/' src/tcp.c
+        # ---------- 修正 setsockopt 超时部分（无多余分号）----------
+        # 1. 替换 tout 定义
+        sed -i '/\/\* Set I\/O timeout \*\//,/;/ {
+            s/struct timeval tout = { \.tv_sec  = io_timeout };/#ifdef __MINGW32__\n\tDWORD tout = io_timeout * 1000;\n#else\n\tstruct timeval tout = { .tv_sec = io_timeout };\n#endif/
+        }' src/tcp.c
         
-        sed -i 's|setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, &tout, sizeof(tout))|#ifdef __MINGW32__\n\tsetsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)\&tout, sizeof(tout));\n#else\n\tsetsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, \&tout, sizeof(tout));\n#endif|' src/tcp.c
+        # 2. 替换 SO_RCVTIMEO 调用
+        sed -i '/setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, &tout, sizeof(tout))/ {
+            s/setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, &tout, sizeof(tout))/#ifdef __MINGW32__\n\tsetsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)\&tout, sizeof(tout));\n#else\n\tsetsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, \&tout, sizeof(tout));\n#endif/
+        }' src/tcp.c
         
-        sed -i 's|setsockopt(sock_fd, SOL_SOCKET, SO_SNDTIMEO, &tout, sizeof(tout))|#ifdef __MINGW32__\n\tsetsockopt(sock_fd, SOL_SOCKET, SO_SNDTIMEO, (const char *)\&tout, sizeof(tout));\n#else\n\tsetsockopt(sock_fd, SOL_SOCKET, SO_SNDTIMEO, \&tout, sizeof(tout));\n#endif|' src/tcp.c
+        # 3. 替换 SO_SNDTIMEO 调用
+        sed -i '/setsockopt(sock_fd, SOL_SOCKET, SO_SNDTIMEO, &tout, sizeof(tout))/ {
+            s/setsockopt(sock_fd, SOL_SOCKET, SO_SNDTIMEO, &tout, sizeof(tout))/#ifdef __MINGW32__\n\tsetsockopt(sock_fd, SOL_SOCKET, SO_SNDTIMEO, (const char *)\&tout, sizeof(tout));\n#else\n\tsetsockopt(sock_fd, SOL_SOCKET, SO_SNDTIMEO, \&tout, sizeof(tout));\n#endif/
+        }' src/tcp.c
         
         # ---------- 其他必要修正 ----------
         # 禁用 get_if_ip
