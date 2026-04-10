@@ -94,7 +94,7 @@ jobs:
         sed -i '/http_addheader.*Range: bytes=%lld-/s/conn->currentbyte/(long long)conn->currentbyte/' src/http.c
         
         # ---------- src/tcp.c: Winsock error handling and fcntl fixes ----------
-        # 1. 在 axel.h 包含后添加自定义 Winsock 错误函数
+        # 1. 在 axel.h 包含后添加自定义 Winsock 错误函数（可选，用于其他地方）
         sed -i '/^#include "axel.h"/a \
         \
         #ifdef __MINGW32__\
@@ -106,8 +106,23 @@ jobs:
         }\
         #endif' src/tcp.c
         
-        # 2. 替换 tcp_error 中的 strerror(errno)
-        sed -i 's/tcp_error(hostname, port, strerror(errno))/tcp_error(hostname, port, winsock_strerror(WSAGetLastError()))/' src/tcp.c
+        # 2. 完全重写 tcp_error 函数，Windows 下强制输出 Winsock 错误码
+        sed -i '/^inline static void$/,/^}$/c\
+        #ifdef __MINGW32__\
+        static void tcp_error(char *hostname, int port, const char *reason)\
+        {\
+        \tint err = WSAGetLastError();\
+        \tfprintf(stderr, "Unable to connect to server %s:%i: Winsock error %d\\n",\
+        \t\thostname, port, err);\
+        }\
+        #else\
+        inline static void\
+        tcp_error(char *hostname, int port, const char *reason)\
+        {\
+        \tfprintf(stderr, _("Unable to connect to server %s:%i: %s\\n"),\
+        \t\thostname, port, reason);\
+        }\
+        #endif' src/tcp.c
         
         # 3. fcntl -> ioctlsocket
         sed -i 's/fcntl(sock_fd, F_SETFL, O_NONBLOCK)/{\
@@ -119,7 +134,7 @@ jobs:
         \t\t\tioctlsocket(sock_fd, FIONBIO, \&mode);\
         \t\t}/g' src/tcp.c
         
-        # 4. 仅替换 setsockopt 前的 tout 定义（位于 "Set I/O timeout" 注释后）
+        # 4. 替换 setsockopt 前的 tout 定义（位于 "Set I/O timeout" 注释后）
         sed -i '/\/\* Set I\/O timeout \*\//,/;/ s/struct timeval tout = { \.tv_sec  = io_timeout };/DWORD tout = io_timeout * 1000;/' src/tcp.c
         
         # 5. 调整 setsockopt 调用以兼容 DWORD
