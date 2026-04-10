@@ -93,7 +93,7 @@ jobs:
         sed -i '/http_addheader.*Range: bytes=%lld-%lld/s/conn->lastbyte, conn->currentbyte/(long long)conn->lastbyte, (long long)conn->currentbyte/' src/http.c
         sed -i '/http_addheader.*Range: bytes=%lld-/s/conn->currentbyte/(long long)conn->currentbyte/' src/http.c
         
-        # ---------- src/tcp.c: Winsock init, error handling, fcntl fixes ----------
+        # ---------- src/tcp.c: Winsock init, error handling, blocking connect ----------
         # 1. 在 tcp_connect 函数开头添加 Winsock 初始化
         sed -i '/^tcp_connect(tcp_t \*tcp, char \*hostname, int port, int secure, char \*local_if,$/,/^{/ {
           /^{/ a\
@@ -126,15 +126,18 @@ jobs:
         }\
         #endif' src/tcp.c
         
-        # 3. fcntl -> ioctlsocket
-        sed -i 's/fcntl(sock_fd, F_SETFL, O_NONBLOCK)/{\
-        \t\t\tunsigned long mode = 1;\
-        \t\t\tioctlsocket(sock_fd, FIONBIO, \&mode);\
-        \t\t}/g' src/tcp.c
-        sed -i 's/fcntl(sock_fd, F_SETFL, 0)/{\
-        \t\t\tunsigned long mode = 0;\
-        \t\t\tioctlsocket(sock_fd, FIONBIO, \&mode);\
-        \t\t}/g' src/tcp.c
+        # 3. Windows 下禁用非阻塞模式：注释掉 fcntl 调用，并删除恢复阻塞的语句
+        sed -i 's/^\t\t\tfcntl(sock_fd, F_SETFL, O_NONBLOCK);$/\
+        #ifdef __MINGW32__\
+        \t\t\t/* Windows: rely on SO_SNDTIMEO for connect timeout, stay blocking */\
+        #else\
+        \t\t\tfcntl(sock_fd, F_SETFL, O_NONBLOCK);\
+        #endif/' src/tcp.c
+        
+        sed -i 's/^\tfcntl(sock_fd, F_SETFL, 0);$/\
+        #ifndef __MINGW32__\
+        \tfcntl(sock_fd, F_SETFL, 0);\
+        #endif/' src/tcp.c
         
         # 4. 替换 setsockopt 前的 tout 定义（位于 "Set I/O timeout" 注释后）
         sed -i '/\/\* Set I\/O timeout \*\//,/;/ s/struct timeval tout = { \.tv_sec  = io_timeout };/DWORD tout = io_timeout * 1000;/' src/tcp.c
