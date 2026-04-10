@@ -173,16 +173,12 @@ jobs:
             c = re.sub(r'\bclose\s*\(', 'WIN32_NET_CLOSE(', c)
             with open(fname, "w") as f: f.write(c)
 
-        # 4. 修复格式字符串 %jd -> %lld（改用正则全局替换，防止遗漏）
+        # 4. 修复格式字符串 %jd -> %lld（仅修复格式字符串，不盲目强转变量）
         for fname in ["src/axel.c", "src/http.c", "src/conn.c"]:
             if not os.path.exists(fname): continue
             with open(fname, "r") as f: c = f.read()
+            # 只替换格式字符串中的 %jd，避免影响赋值语句
             c = re.sub(r'%jd', '%lld', c)
-            c = c.replace("axl->size", "(long long)axl->size")
-            c = c.replace("axl->bytes_done", "(long long)axl->bytes_done")
-            c = c.replace("axl->start_byte", "(long long)axl->start_byte")
-            c = c.replace("conn->currentbyte", "(long long)conn->currentbyte")
-            c = c.replace("conn->lastbyte", "(long long)conn->lastbyte")
             with open(fname, "w") as f: f.write(c)
 
         # 5. 修复 tcp.c 平台差异
